@@ -30,6 +30,9 @@ manifest 里卡片的 `url` 用相对路径，门户渲染时拼成 `link_base +
 
 默认源（kg-hub）写死在 `portal.py`，可用环境变量 `PORTAL_SOURCES`（JSON 数组）整体覆盖；单独覆盖 kg-hub 的两个 base 用 `KGHUB_FETCH_BASE` / `KGHUB_LINK_BASE`。
 
+> 任何源要接入门户实现的那个 `/portal_manifest` 端点的完整 JSON 规范，见
+> [docs/MANIFEST-CONTRACT.md](docs/MANIFEST-CONTRACT.md)。
+
 ## 部署
 
 ```sh
