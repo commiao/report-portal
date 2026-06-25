@@ -1,0 +1,39 @@
+# report-portal on Synology NAS — standalone aggregator, its OWN compose project
+# (project name: report-portal), deliberately separate from kg-hub.
+#
+# Networking: it joins kg-hub's existing docker network (kg-hub_default, declared
+# below as external) ONLY so it can reach the kg-hub server by service name for
+# server-side manifest fetches (http://kg_hub_server:8080). The portal itself is
+# published on host loopback 17172; tailscale userspace forwarding exposes
+# <tailscale-ip>:17172 to the tailnet (same pattern as kg-hub's 17171).
+#
+# Layout on NAS:
+#   /volume1/docker/report-portal-src/   <- this folder (Project folder = build context)
+
+services:
+  report_portal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: report-portal:latest
+    container_name: report-portal
+    restart: unless-stopped
+    environment:
+      - PORTAL_BIND_HOST=0.0.0.0
+      - PORTAL_BIND_PORT=8080
+      # Server-side fetch over the shared docker network; browser links over tailnet.
+      - KGHUB_FETCH_BASE=http://kg_hub_server:8080
+      - KGHUB_LINK_BASE=http://100.123.208.32:17171
+      # To add more sources, set PORTAL_SOURCES to a JSON array (overrides default):
+      # - PORTAL_SOURCES=[{"id":"kg-hub","name":"kg-hub 知识胶囊","fetch_base":"http://kg_hub_server:8080","link_base":"http://100.123.208.32:17171","manifest":"/portal_manifest"}]
+    ports:
+      # Host loopback only (off 17171); tailscale forwards <tailscale-ip>:17172 -> here.
+      - "127.0.0.1:17172:8080"
+    networks:
+      - kghub
+
+networks:
+  # Reuse kg-hub's existing network so service-name DNS (kg_hub_server) resolves.
+  kghub:
+    external: true
+    name: kg-hub_default
