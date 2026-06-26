@@ -28,7 +28,12 @@
 
 manifest 里卡片的 `url` 用相对路径，门户渲染时拼成 `link_base + url`。
 
-默认源（kg-hub）写死在 `portal.py`，可用环境变量 `PORTAL_SOURCES`（JSON 数组）整体覆盖；单独覆盖 kg-hub 的两个 base 用 `KGHUB_FETCH_BASE` / `KGHUB_LINK_BASE`。
+默认源写死在 `portal.py`，可用环境变量 `PORTAL_SOURCES`（JSON 数组）整体覆盖；单独覆盖 kg-hub 的两个 base 用 `KGHUB_FETCH_BASE` / `KGHUB_LINK_BASE`。
+
+源有两种形态：
+
+- **manifest 源**（如 kg-hub）：`{id, name, fetch_base, link_base, manifest}` —— 门户服务端抓 `fetch_base+manifest` 合并卡片。适合自己会暴露 `/portal_manifest` 的服务。
+- **静态源**（如 OpenClaw 财务 `:18765/finance`）：`{id, name, cards: [...]}` —— 卡片在配置里直接声明，**门户不抓取**。适合不暴露 manifest 的单页看板，尤其是**在另一台 tailnet 主机上**的：卡片链接由用户**浏览器**打开（浏览器在 tailnet 内可达），所以门户容器不需要能够到那台主机。卡片 `url` 写绝对地址即原样用，相对路径才拼 `link_base`。
 
 > 任何源要接入门户实现的那个 `/portal_manifest` 端点的完整 JSON 规范，见
 > [docs/MANIFEST-CONTRACT.md](docs/MANIFEST-CONTRACT.md)。

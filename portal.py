@@ -35,7 +35,15 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 # ---------- Source registry (override with PORTAL_SOURCES env, JSON) ----------
-# Each: {id, name, fetch_base, link_base, manifest}
+# A source is EITHER:
+#   - manifest-based: {id, name, fetch_base, link_base, manifest}
+#       portal fetches fetch_base+manifest server-side and merges the cards.
+#   - static:         {id, name, cards: [{name,desc,url,icon,ready}], link_base?}
+#       no fetch — cards are declared inline. Use this for sources that don't (yet)
+#       expose /portal_manifest, or single-page dashboards on another tailnet host:
+#       the card link is opened by the user's BROWSER (tailnet-reachable), so the
+#       portal container never needs to reach that host. Absolute card urls are
+#       used as-is; relative urls get link_base prefixed.
 _DEFAULT_SOURCES = [
     {
         "id": "kg-hub",
@@ -43,6 +51,19 @@ _DEFAULT_SOURCES = [
         "fetch_base": os.environ.get("KGHUB_FETCH_BASE", "http://kg_hub_server:8080"),
         "link_base": os.environ.get("KGHUB_LINK_BASE", "http://100.123.208.32:17171"),
         "manifest": "/portal_manifest",
+    },
+    {
+        "id": "openclaw-finance",
+        "name": "OpenClaw 财务",
+        "cards": [
+            {
+                "name": "财务看板",
+                "desc": "OpenClaw 财务看板（收支 / 成本概览）",
+                "url": os.environ.get("FINANCE_URL", "http://100.79.177.102:18765/finance"),
+                "icon": "💰",
+                "ready": True,
+            },
+        ],
     },
 ]
 
@@ -63,28 +84,41 @@ SOURCES = _load_sources()
 FETCH_TIMEOUT = float(os.environ.get("PORTAL_FETCH_TIMEOUT", "5"))
 
 
+def _norm_cards(reports, link_base: str) -> list:
+    """Normalize a list of card dicts: fill defaults, prefix relative urls with
+    link_base. Shared by the manifest and static paths."""
+    cards = []
+    for r in reports:
+        u = r.get("url", "")
+        cards.append({
+            "name": r.get("name", "?"),
+            "desc": r.get("desc", ""),
+            "icon": r.get("icon", "📄"),
+            "ready": bool(r.get("ready", True)),
+            "url": link_base + u if u.startswith("/") else u,
+        })
+    return cards
+
+
 async def _fetch_source(client: httpx.AsyncClient, src: dict) -> dict:
-    """Fetch one source's manifest. Never raises — degrades to an error marker
-    so one unreachable source can't take down the whole portal."""
+    """Resolve one source's cards. Never raises — degrades to an error marker so
+    one unreachable source can't take down the whole portal. A source with inline
+    `cards` is static (no fetch); otherwise its manifest is fetched."""
     sid = src.get("id", "?")
     name = src.get("name", sid)
     link_base = (src.get("link_base") or "").rstrip("/")
+
+    if src.get("cards") is not None:  # static source — no network call
+        return {"id": sid, "name": name, "ok": True,
+                "cards": _norm_cards(src["cards"], link_base)}
+
     url = (src.get("fetch_base") or "").rstrip("/") + src.get("manifest", "/portal_manifest")
     try:
         resp = await client.get(url)
         resp.raise_for_status()
         payload = resp.json()
         reports = payload.get("reports", payload if isinstance(payload, list) else [])
-        cards = []
-        for r in reports:
-            cards.append({
-                "name": r.get("name", "?"),
-                "desc": r.get("desc", ""),
-                "icon": r.get("icon", "📄"),
-                "ready": bool(r.get("ready", True)),
-                "url": link_base + r.get("url", "") if r.get("url", "").startswith("/") else r.get("url", ""),
-            })
-        return {"id": sid, "name": name, "ok": True, "cards": cards}
+        return {"id": sid, "name": name, "ok": True, "cards": _norm_cards(reports, link_base)}
     except Exception as exc:  # noqa: BLE001
         return {"id": sid, "name": name, "ok": False, "error": f"{type(exc).__name__}", "cards": []}
 
