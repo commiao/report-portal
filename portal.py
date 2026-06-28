@@ -65,6 +65,19 @@ _DEFAULT_SOURCES = [
             },
         ],
     },
+    {
+        "id": "skill-sync",
+        "name": "跨设备工具同步",
+        "cards": [
+            {
+                "name": "工具同步面板",
+                "desc": "跨设备 skill / 工具同步管理（Skill Sync Sidecar）",
+                "url": os.environ.get("SKILL_SYNC_URL", "http://100.123.208.32:8765"),
+                "icon": "🔄",
+                "ready": True,
+            },
+        ],
+    },
 ]
 
 
