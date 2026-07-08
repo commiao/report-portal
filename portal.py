@@ -78,6 +78,19 @@ _DEFAULT_SOURCES = [
             },
         ],
     },
+    {
+        "id": "openclaw-recruit",
+        "name": "OpenClaw 招聘情报",
+        "cards": [
+            {
+                "name": "招聘情报面板",
+                "desc": "OpenClaw 招聘情报看板",
+                "url": os.environ.get("RECRUIT_URL", "http://100.99.15.39:18180"),
+                "icon": "🧑‍💼",
+                "ready": True,
+            },
+        ],
+    },
 ]
 
 
