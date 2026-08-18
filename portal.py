@@ -66,6 +66,21 @@ _DEFAULT_SOURCES = [
         ],
     },
     {
+        # NOTE: 由另一个协同会话加入（曾只在 NAS 运行容器里、未进 git）；
+        # 2026-08-18 抢救合并进 git，避免多 actor 共享目录导致丢失。
+        "id": "openclaw-content-ops",
+        "name": "OpenClaw 内容运营",
+        "cards": [
+            {
+                "name": "内容运营看板",
+                "desc": "公众号草稿、掘金实验、指标待办和内容契约健康",
+                "url": os.environ.get("CONTENT_OPS_URL", "http://100.79.177.102:18766/content-ops"),
+                "icon": "✍️",
+                "ready": True,
+            },
+        ],
+    },
+    {
         "id": "skill-sync",
         "name": "跨设备工具同步",
         "cards": [
@@ -85,8 +100,21 @@ _DEFAULT_SOURCES = [
             {
                 "name": "招聘情报面板",
                 "desc": "OpenClaw 招聘情报看板",
-                "url": os.environ.get("RECRUIT_URL", "http://100.99.15.39:18180"),
+                "url": os.environ.get("RECRUIT_URL", "http://100.123.208.32:18180"),
                 "icon": "🧑‍💼",
+                "ready": True,
+            },
+        ],
+    },
+    {
+        "id": "task-hub",
+        "name": "task-hub 任务",
+        "cards": [
+            {
+                "name": "任务看板",
+                "desc": "task-hub 跨工具任务系统看板",
+                "url": os.environ.get("TASK_HUB_URL", "http://100.123.208.32:17173/ui"),
+                "icon": "📋",
                 "ready": True,
             },
         ],
