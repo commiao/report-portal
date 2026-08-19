@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# 一键把 report-portal 部署到 NAS（独立 compose 项目 report-portal）并探活。
+# 一键把 report-portal 部署到 NAS（compose 项目 report-portal-src）并探活。
 #
 # 与 kg-hub 解耦：这是它自己的容器/项目/端口(17172)，只借用 kg-hub 的 docker 网络
 # (kg-hub_default，external) 做服务端 manifest 抓取。改完代码跑这一条即可。
+#
+# ⚠️ 单一项目名约定：compose 项目名固定 report-portal-src（= NAS 源码目录名，也是
+# 线上正在跑的项目名）。多 actor 若用不同项目名会各建容器抢 :17172 → 端口冲突/漂移。
+# 任何管理 report-portal 的一方都必须用这个项目名，别再用 -p report-portal。
 #
 # 用法：
 #   deploy/redeploy.sh            # 同步全部源码 + 重建重启 + 探活
@@ -22,10 +26,10 @@ for f in $FILES; do
     "cat > \"$SRC/.dep.tmp\" && mv -f \"$SRC/.dep.tmp\" \"$SRC/$f\" && echo ok"
 done
 
-echo "[2/3] 重建镜像 + 重启容器（project=report-portal）"
+echo "[2/3] 重建镜像 + 重启容器（project=report-portal-src）"
 ssh -o BatchMode=yes -o ConnectTimeout=20 "$NAS" \
-  "cd $SRC && $DK compose -p report-portal build report_portal >/dev/null 2>&1 && \
-   $DK compose -p report-portal up -d report_portal >/dev/null 2>&1 && echo '      done'"
+  "cd $SRC && $DK compose -p report-portal-src build report_portal >/dev/null 2>&1 && \
+   $DK compose -p report-portal-src up -d report_portal >/dev/null 2>&1 && echo '      done'"
 
 echo "[3/3] 探活"
 URL="${PORTAL_URL:-http://100.123.208.32:17172}"
