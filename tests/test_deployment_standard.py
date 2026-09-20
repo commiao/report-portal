@@ -61,6 +61,42 @@ class ReleasePathTests(unittest.TestCase):
         self.assertIn("sha256sum", RELEASE)
         self.assertIn("落地后与", RELEASE)
 
+    def test_prunes_files_git_no_longer_has(self):
+        """`git archive | tar xf` 只覆盖和新增，从不删除。不清的话，git 里删掉的
+        文件会一直留在 NAS 上并可能被执行——「线上等于某个 commit」就只在「有
+        什么」这一半成立（kg-hub 的 T-0084 至今开着）。"""
+        self.assertIn("--list-extra", RELEASE)
+        self.assertIn("rm -f --", RELEASE)
+
+    def test_prune_and_drift_share_one_definition(self):
+        """准则 28：「该删什么」和「报什么漂移」必须同源。release.sh 自己再写一份
+        排除清单的话，两边一旦分叉，要么删掉检测认为正常的文件，要么检测一直报
+        prune 不肯删的东西。"""
+        # 清单只能来自检测器，不能在 release.sh 里另起一套 ignore 规则
+        self.assertIn("check_source_drift.py", RELEASE)
+        for own_rule in ("IGNORE_EXACT", "IGNORE_PREFIX", "IGNORE_SUFFIX"):
+            self.assertNotIn(own_rule, RELEASE)
+
+    def test_prune_refuses_paths_that_escape_the_deploy_dir(self):
+        """删除是不可逆的，清单又来自外部命令的输出。"""
+        self.assertIn("*..*", RELEASE)
+        self.assertIn("拒绝删除可疑路径", RELEASE)
+
+    def test_a_failed_listing_does_not_read_as_nothing_to_prune(self):
+        """空清单和「这次没查成」混成一句，取数一挂就会播报成「清理干净」。
+        没查清时宁可不删——留着让漂移检测继续报。
+
+        断言那个**比较真的在跑**，不只是这些字眼出现过：变异验证时把分支改成
+        `if false` 之后，`EXTRA_RC` 和那句提示都还原样留在文件里，只查字符串
+        在不在的写法当场放行了它。
+        """
+        self.assertIn('EXTRA_RC=$?', RELEASE)                 # 真取了退出码
+        self.assertIn('[ "$EXTRA_RC" = "2" ]', RELEASE)       # 真拿它做了判断
+        # 而且这个判断必须排在「没有多余文件」那句之前，否则查不了会先被归成「干净」
+        guard = RELEASE.index('[ "$EXTRA_RC" = "2" ]')
+        empty = RELEASE.index("没有多余文件")
+        self.assertLess(guard, empty)
+
     def test_has_a_rollback_path(self):
         """准则 6/7：带着没有退路的发布切生产，就是 kg-hub「切了之后回不来」那种
         形态。本服务无状态，回滚 = 标签指回去再 up。"""

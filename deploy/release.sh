@@ -125,6 +125,43 @@ done < <(git -C "$REPO" ls-tree -r --name-only "$SHA")
 [ "$mismatch" = "0" ] || die "$mismatch 个文件落地后与 $SHORT 不一致"
 say "      $checked 个文件全部一致"
 
+# ---- 5.5 清掉 git 里已经没有的文件 -----------------------------------------
+# `git archive | tar xf` 只覆盖和新增，从不删除。不清的话，git 里删掉的文件会一直
+# 留在 NAS 上——而且可能被执行；于是「线上等于某个 commit」只在「有什么」这一半
+# 成立。该删哪些**不自己再写一份排除清单**：问漂移检测要（--list-extra 就是它
+# 报「只在 NAS 上存在」的那批），两边共用同一个定义，不会各自演化（准则 28）。
+# 删除已被第 3 步的整树备份覆盖（准则 5：备份 ⊇ 覆盖，现在「覆盖」含删除）。
+say "[5.5] 清理 git 里已不存在的文件"
+set +e
+EXTRA=$(python3 "$REPO/deploy/check_source_drift.py" --ref "$SHA" --list-extra 2>/dev/null)
+EXTRA_RC=$?
+set -e
+# 「没有多余文件」和「这次没查成」必须分开报。混成一句的话，取数一挂就会播报
+# 成「清理干净」——同一个病本次已经在 health 和巡检上各修过一遍了。
+if [ "$EXTRA_RC" = "2" ]; then
+  say "      ⚠️ 拿不到清单（检测退出 2），本次不删任何东西"
+  say "         宁可留着让漂移检测继续报，也不在没查清时删生产上的文件"
+elif [ -z "$EXTRA" ]; then
+  say "      没有多余文件"
+else
+  pruned=0
+  while read -r path; do
+    [ -n "$path" ] || continue
+    # 路径校验：只在 $SRC 里删，绝不让 .. 或绝对路径跑出去。
+    case "$path" in
+      /*|*..*) say "      拒绝删除可疑路径：$path"; continue ;;
+    esac
+    say "      删除：$path"
+    on_nas "rm -f -- '$SRC/$path'"
+    pruned=$((pruned + 1))
+  done <<EOF
+$EXTRA
+EOF
+  # 文件删完可能留下空目录；清掉它们，但绝不碰 \$SRC 本身。
+  on_nas "find '$SRC' -mindepth 1 -type d -empty -delete 2>/dev/null || true"
+  say "      共清理 $pruned 个"
+fi
+
 # ---- 6. 构建不可变镜像 + 切标签起容器 --------------------------------------
 say "[6/7] 构建 $IMAGE:$SHORT 并启动（不动 latest）"
 on_nas "cd '$SRC' && printf 'PORTAL_IMAGE_TAG=%s\n' '$SHORT' > .env && \

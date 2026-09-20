@@ -101,6 +101,9 @@ def main() -> int:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--status-file", default=None,
                     help="把判决写成 fleet-ops 巡检的契约格式")
+    ap.add_argument("--list-extra", action="store_true",
+                    help="只列「只在 NAS 上存在」的文件（每行一个），供 release.sh "
+                         "prune 使用——让「该删什么」和「报什么漂移」出自同一个定义")
     args = ap.parse_args()
 
     try:
@@ -137,6 +140,13 @@ def main() -> int:
         "content_differs": differs,
         "clean": not (only_git or only_nas or differs),
     }
+
+    if args.list_extra:
+        # 机器可读、只此一样东西：release.sh 照这份清单删。它和上面 only_nas 是
+        # 同一个变量，所以「该删什么」与「报什么漂移」不可能各自演化（准则 28）。
+        for p in only_nas:
+            print(p)
+        return 0 if verdict["clean"] else 1
 
     if args.json:
         print(json.dumps(verdict, ensure_ascii=False, indent=2))
