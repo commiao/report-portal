@@ -1,43 +1,31 @@
 #!/usr/bin/env bash
-# 一键把 report-portal 部署到 NAS（compose 项目 report-portal-src）并探活。
+# 已停用——请改用 deploy/release.sh。
 #
-# 与 kg-hub 解耦：这是它自己的容器/项目/端口(17172)，只借用 kg-hub 的 docker 网络
-# (kg-hub_default，external) 做服务端 manifest 抓取。改完代码跑这一条即可。
+# 这个脚本原来做的是 `cat 工作树文件 | ssh`：把本机工作树里当下那一份传上 NAS 再
+# 重建。问题不是它不好用，而是它让「线上跑的是哪个 commit」这个问题没有答案——
+# 任何未提交的改动都会被发上去，漂移检测只能一直报「对不上」。
 #
-# ⚠️ 单一项目名约定：compose 项目名固定 report-portal-src（= NAS 源码目录名，也是
-# 线上正在跑的项目名）。多 actor 若用不同项目名会各建容器抢 :17172 → 端口冲突/漂移。
-# 任何管理 report-portal 的一方都必须用这个项目名，别再用 -p report-portal。
+# 更要命的是准则 21：绕过发布路径改一次生产，正式发布路径本身也会失效。只要这条
+# 旁路还在，release.sh 的「只发主干」闸、备份、落地复核、自动回滚就全都可以被绕过，
+# 那它们就等于不存在。所以这里直接堵死，而不是留着「紧急时还能用」。
 #
-# 用法：
-#   deploy/redeploy.sh            # 同步全部源码 + 重建重启 + 探活
+# 对应关系：
+#   旧 redeploy.sh                     新 deploy/release.sh
+#   传工作树                            git archive <commit>（发布物 = 某个 commit）
+#   无闸                                merge-base --is-ancestor <sha> origin/main
+#   无备份                              发布前整树 tgz 备份
+#   传完就算                            落地后逐文件 sha256 复核
+#   无回滚                              验收失败自动回上一个标签；rollback 子命令
 set -euo pipefail
 
-NAS="${KG_HUB_NAS_SSH:-commiao@100.123.208.32}"
-SRC="/volume1/docker/report-portal-src"
-DK="sudo -n /var/packages/ContainerManager/target/usr/bin/docker"
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
-FILES="portal.py Dockerfile docker-compose.yml requirements.txt .dockerignore"
+cat >&2 <<'EOF'
+deploy/redeploy.sh 已停用（它从开发工作树直发，线上版本无法追溯到 commit）。
 
-echo "[1/3] 同步源码到 NAS（原子 tmp+mv）"
-ssh -o BatchMode=yes "$NAS" "mkdir -p \"$SRC\""
-for f in $FILES; do
-  printf '      %s … ' "$f"
-  cat "$REPO/$f" | ssh -o BatchMode=yes "$NAS" \
-    "cat > \"$SRC/.dep.tmp\" && mv -f \"$SRC/.dep.tmp\" \"$SRC/$f\" && echo ok"
-done
+请改用：
+  deploy/release.sh              # 发布 origin/main
+  deploy/release.sh --dry-run    # 只跑闸门，不动 NAS
+  deploy/release.sh rollback <sha>
 
-echo "[2/3] 重建镜像 + 重启容器（project=report-portal-src）"
-ssh -o BatchMode=yes -o ConnectTimeout=20 "$NAS" \
-  "cd $SRC && $DK compose -p report-portal-src build report_portal >/dev/null 2>&1 && \
-   $DK compose -p report-portal-src up -d report_portal >/dev/null 2>&1 && echo '      done'"
-
-echo "[3/3] 探活"
-URL="${PORTAL_URL:-http://100.123.208.32:17172}"
-sleep 3
-for i in 1 2 3 4 5; do
-  code=$(curl -s -m 6 -o /dev/null -w '%{http_code}' "$URL/health" || true)
-  [ "$code" = "200" ] && break; sleep 3
-done
-portal=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "$URL/portal" || true)
-echo "      health=$code  portal=$portal"
-echo "→ 打开 $URL/portal"
+发布前请先 git commit && git push——release.sh 只发主干上的 commit。
+EOF
+exit 2

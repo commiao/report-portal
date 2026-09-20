@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# report-portal 发布：线上跑的源码严格等于主干上的某个 commit，且可机器验证。
+#
+# ## 为什么不是 redeploy.sh 那样 `cat 工作树文件 | ssh`
+# 那样发布物和仓库里的任何一个 commit 都对不上：本机随便一个未提交的改动都会被发
+# 上去，而漂移检测只会一直报「对不上」。这里用 `git archive <commit>`——发布物按
+# 定义等于那个 commit，落地后再逐文件比 sha256 复核（准则 1 / 26）。
+#
+# ## 只发主干（准则 18）
+# 推到 origin 只保证别人**能**找到它，不保证别人**会**拿到它。从分支直发，线上那
+# 份就只存在于那条分支上，下一个人从 main 出发做的任何事都会把它悄悄抹掉，且没有
+# 冲突提示。闸用 `merge-base --is-ancestor` 而不是「等于 origin/main」——回滚到更
+# 早的 commit 是正当操作，只要它在主干这条线上。
+#
+# ## 回滚语义（准则 7）
+# report-portal 无状态、可换容器：回滚 = 把 .env 里的镜像标签指回上一个 sha 再 up。
+# 不需要 kg-hub 那套排空窗口（它有在飞的抽取，这个没有）。
+#
+# 用法：
+#   deploy/release.sh                    # 发布 origin/main
+#   deploy/release.sh --sha <commit>     # 发布指定 commit（必须在主干上）
+#   deploy/release.sh --dry-run          # 只跑闸门与计划，不动 NAS
+#   deploy/release.sh rollback <sha>     # 回滚到盘上已有的某个镜像标签
+set -euo pipefail
+
+NAS="${PORTAL_NAS_SSH:-commiao@100.123.208.32}"
+SRC="${PORTAL_NAS_SRC:-/volume1/docker/report-portal-src}"
+DK="${PORTAL_DOCKER:-sudo -n /var/packages/ContainerManager/target/usr/bin/docker}"
+PROJECT="${PORTAL_COMPOSE_PROJECT:-report-portal-src}"
+SERVICE="${PORTAL_COMPOSE_SERVICE:-report_portal}"
+CONTAINER="${PORTAL_CONTAINER:-report-portal}"
+IMAGE="${PORTAL_IMAGE:-report-portal}"
+HEALTH_URL="${PORTAL_HEALTH_URL:-http://100.123.208.32:17172/health}"
+PORTAL_URL_="${PORTAL_URL:-http://100.123.208.32:17172/portal}"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=20)
+
+say() { printf '%s\n' "$*"; }
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+on_nas() { ssh "${SSH_OPTS[@]}" "$NAS" "$@"; }
+
+REF="origin/main"
+DRY=0
+MODE="release"
+ROLLBACK_SHA=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    rollback) MODE="rollback"; ROLLBACK_SHA="${2:-}"; shift 2 || shift ;;
+    --sha) REF="${2:?--sha 需要一个 commit}"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help) sed -n '1,30p' "$0"; exit 0 ;;
+    *) die "未知参数：$1" ;;
+  esac
+done
+
+# ---- 回滚：只切标签，不重建（镜像必须已在盘上）-----------------------------
+if [ "$MODE" = "rollback" ]; then
+  [ -n "$ROLLBACK_SHA" ] || die "rollback 需要一个镜像标签（sha）"
+  on_nas "$DK image inspect $IMAGE:$ROLLBACK_SHA >/dev/null 2>&1" \
+    || die "NAS 上没有镜像 $IMAGE:$ROLLBACK_SHA，无法回滚到它"
+  say "回滚到 $IMAGE:$ROLLBACK_SHA"
+  on_nas "cd $SRC && printf 'PORTAL_IMAGE_TAG=%s\n' '$ROLLBACK_SHA' > .env && \
+          $DK compose -p $PROJECT up -d --no-build $SERVICE >/dev/null 2>&1 && echo ok"
+  sleep 3
+  code=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "$HEALTH_URL" || true)
+  say "health=$code"
+  [ "$code" = "200" ] || die "回滚后健康检查未通过"
+  exit 0
+fi
+
+# ---- 1. 定 commit + 只发主干闸（准则 18）-----------------------------------
+say "[1/7] 解析并校验 commit"
+git -C "$REPO" fetch origin --quiet
+SHA=$(git -C "$REPO" rev-parse "$REF^{commit}") || die "解析不了 $REF"
+SHORT=$(git -C "$REPO" rev-parse --short "$SHA")
+git -C "$REPO" merge-base --is-ancestor "$SHA" origin/main \
+  || die "$SHORT 不在 origin/main 这条线上——改代码走分支，发布前先合回主干（准则 18）"
+say "      发布 $SHORT（已确认在主干上）"
+
+# 工作树脏不影响发布物（git archive 取的是 commit），但要让人知道发的不是眼前这份
+if ! git -C "$REPO" diff --quiet || ! git -C "$REPO" diff --cached --quiet; then
+  say "      注意：工作树有未提交改动，它们【不会】被发布（发的是 $SHORT）"
+fi
+
+if [ "$DRY" = "1" ]; then
+  say "[dry-run] 将发布 $SHORT，共 $(git -C "$REPO" archive "$SHA" | tar -t | wc -l | tr -d ' ') 个条目"
+  exit 0
+fi
+
+# ---- 2. 记下回滚点（准则 6/7）----------------------------------------------
+PREV=$(on_nas "grep '^PORTAL_IMAGE_TAG=' $SRC/.env 2>/dev/null | cut -d= -f2-" || true)
+say "[2/7] 回滚点：${PREV:-<无，首次按准则发布>}"
+
+# ---- 3. 备份整棵源目录（准则 5：备份 ⊇ 覆盖）-------------------------------
+# git archive 会覆盖整棵树，所以备份也必须是整棵树——只备份「构建输入」那几个文件
+# 的话，第一次真跑就会把生产独有的文件盖掉。
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP="$SRC/../report-portal-src.backup-$STAMP.tgz"
+say "[3/7] 备份 $SRC → $BACKUP"
+on_nas "tar czf '$BACKUP' -C '$SRC' . && ls -la '$BACKUP' | awk '{print \"      \" \$5 \" bytes\"}'"
+
+# ---- 4. git archive → NAS（发布物严格等于该 commit，准则 1）-----------------
+say "[4/7] git archive $SHORT → $SRC"
+git -C "$REPO" archive --format=tar "$SHA" \
+  | ssh "${SSH_OPTS[@]}" "$NAS" "mkdir -p '$SRC' && tar xf - -C '$SRC' && echo '      落地完成'"
+
+# ---- 5. 落地逐文件复核（准则 26：不是「我传上去了」，是可机器验证的等于）----
+say "[5/7] 逐文件复核落地内容"
+# 远端哈希一次 ssh 取完（逐文件一次往返的话，十几个文件就是十几秒，而且中途断线
+# 会被读成「不一致」）。比对在本地做。
+NAS_HASHES=$(on_nas "cd '$SRC' && find . -type f -print0 | xargs -0 sha256sum 2>/dev/null")
+mismatch=0
+checked=0
+while read -r path; do
+  [ -n "$path" ] || continue
+  want=$(git -C "$REPO" show "$SHA:$path" | shasum -a 256 | cut -d' ' -f1)
+  got=$(printf '%s\n' "$NAS_HASHES" | awk -v p="./$path" '$2==p {print $1; exit}')
+  checked=$((checked + 1))
+  if [ "$want" != "$got" ]; then
+    say "      不一致：$path"
+    mismatch=$((mismatch + 1))
+  fi
+done < <(git -C "$REPO" ls-tree -r --name-only "$SHA")
+[ "$mismatch" = "0" ] || die "$mismatch 个文件落地后与 $SHORT 不一致"
+say "      $checked 个文件全部一致"
+
+# ---- 6. 构建不可变镜像 + 切标签起容器 --------------------------------------
+say "[6/7] 构建 $IMAGE:$SHORT 并启动（不动 latest）"
+on_nas "cd '$SRC' && printf 'PORTAL_IMAGE_TAG=%s\n' '$SHORT' > .env && \
+        $DK compose -p $PROJECT build $SERVICE >/dev/null 2>&1 && \
+        $DK compose -p $PROJECT up -d $SERVICE >/dev/null 2>&1 && echo '      已启动'"
+
+# ---- 7. 验收：镜像来源比对 + 健康检查；不合格自动回到上一个标签 -------------
+say "[7/7] 验收"
+running=$(on_nas "$DK inspect '$CONTAINER' --format '{{.Config.Image}}' 2>/dev/null" || true)
+say "      容器镜像：$running"
+
+code=""
+for _ in 1 2 3 4 5; do
+  code=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "$HEALTH_URL" || true)
+  [ "$code" = "200" ] && break
+  sleep 3
+done
+pcode=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$PORTAL_URL_" || true)
+say "      health=$code  portal=$pcode"
+
+if [ "$running" != "$IMAGE:$SHORT" ] || [ "$code" != "200" ] || [ "$pcode" != "200" ]; then
+  if [ -n "$PREV" ] && [ "$PREV" != "$SHORT" ]; then
+    say "      验收未通过 → 自动回滚到 $PREV"
+    on_nas "cd '$SRC' && printf 'PORTAL_IMAGE_TAG=%s\n' '$PREV' > .env && \
+            $DK compose -p $PROJECT up -d --no-build $SERVICE >/dev/null 2>&1 && echo '      已回滚'"
+  fi
+  die "验收未通过（镜像=$running health=$code portal=$pcode）"
+fi
+
+say "✅ $SHORT 已上线：$PORTAL_URL_"
+say "   回滚：deploy/release.sh rollback ${PREV:-<上一个 sha>}"

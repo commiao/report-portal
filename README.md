@@ -30,6 +30,8 @@ manifest 里卡片的 `url` 用相对路径，门户渲染时拼成 `link_base +
 
 默认源写死在 `portal.py`，可用环境变量 `PORTAL_SOURCES`（JSON 数组）整体覆盖；单独覆盖 kg-hub 的两个 base 用 `KGHUB_FETCH_BASE` / `KGHUB_LINK_BASE`。
 
+模型网关管理看板以静态卡片接入，默认地址为 `http://100.123.208.32:39010`，可通过 `MODEL_GATEWAY_DASHBOARD_URL` 覆盖。**门户只提供入口，不读取也不保存任何 API Key。**
+
 源有两种形态：
 
 - **manifest 源**（如 kg-hub）：`{id, name, fetch_base, link_base, manifest}` —— 门户服务端抓 `fetch_base+manifest` 合并卡片。适合自己会暴露 `/portal_manifest` 的服务。

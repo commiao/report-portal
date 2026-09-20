@@ -7,9 +7,11 @@ import portal
 class PortalViewTests(unittest.TestCase):
     def test_both_view_modes_are_laid_out_and_switchable(self):
         html = portal._PORTAL_HTML
-        # Each mode owns its own layout rules...
-        self.assertIn(".v-list .grid", html)
-        self.assertIn(".v-tile .grid", html)
+        # Each mode owns its own layout rules. The trailing brace matters:
+        # without it a rename to `.v-tile .gridX{...}` still satisfies assertIn
+        # while the rule no longer applies to anything (caught by mutation).
+        self.assertIn(".v-list .grid{", html)
+        self.assertIn(".v-tile .grid{", html)
         # ...and there is a button per mode to switch between them.
         self.assertIn("data-v=list", html)
         self.assertIn("data-v=tile", html)
@@ -24,11 +26,18 @@ class PortalViewTests(unittest.TestCase):
         html = portal._PORTAL_HTML
         self.assertIn("function renderTile()", html)
         self.assertIn("function renderList()", html)
-        # renderTile builds ONE grid, outside the per-source loop.
         tile_body = html.split("function renderTile()", 1)[1].split("var KEY=", 1)[0]
+        # renderTile builds ONE grid, outside the per-source loop...
         self.assertEqual(tile_body.count("<div class=grid>"), 1)
-        # Only the grouped view emits source headers.
+        # ...only the grouped view emits source headers...
         self.assertNotIn("class=src", tile_body)
+        # ...it actually flattens rather than delegating back to the grouped
+        # renderer (a `return renderList();` in front of the original body left
+        # every text-based assertion above green — caught by mutation)...
+        self.assertNotIn("renderList()", tile_body)
+        # ...and the flattening really is a loop that collects cards.
+        self.assertIn("D.forEach", tile_body)
+        self.assertIn("out.push", tile_body)
         self.assertIn(".v-tile .s{display:block", html)
         self.assertIn(".v-list .s{display:none}", html)
 

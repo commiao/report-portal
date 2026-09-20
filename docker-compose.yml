@@ -15,7 +15,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: report-portal:latest
+    # 标签由 deploy/release.sh 按 git commit 写进同目录 .env。用 `:?` 而不是给
+    # 默认值：宁可让 compose 当场失败，也不要在没人指定版本时悄悄跑成 latest——
+    # 那样线上跑的是哪个 commit 就再也说不清了（准则 1/26）。
+    image: report-portal:${PORTAL_IMAGE_TAG:?必须由 deploy/release.sh 按 git commit 设定；不接受 latest}
     container_name: report-portal
     restart: unless-stopped
     environment:
