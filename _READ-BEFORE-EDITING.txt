@@ -1,0 +1,17 @@
+############################################################
+# 别在这个目录里手改任何文件 —— 这是发布落地目录，不是编辑处。
+#
+# 它的内容由 deploy/release.sh 用 `git archive <commit>` 整棵覆盖：
+# 手改的东西下一次发布就没了，而且不进 git = 说不清线上跑的是什么。
+#
+# 要改：
+#   1. 在 git 仓 git@github-commiao:commiao/report-portal.git 改
+#   2. git commit && git push（release.sh 只发 origin/main 上的 commit）
+#   3. 跑 deploy/release.sh
+#
+# 想知道现在线上等于哪个 commit：
+#   cat .env            # PORTAL_IMAGE_TAG=<sha>
+#   deploy/check_source_drift.py   （在仓库里跑，比对本目录与主干）
+#
+# compose 项目名固定 report-portal-src。详见仓内 DEPLOY.md。
+############################################################
