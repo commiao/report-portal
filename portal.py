@@ -119,6 +119,22 @@ _DEFAULT_SOURCES = [
             },
         ],
     },
+    {
+        "id": "model-gateway",
+        "name": "模型与凭证",
+        "cards": [
+            {
+                "name": "NAS 模型网关",
+                "desc": "按业务 Key 选择模型，并新增或更换加密 API Key 凭证",
+                "url": os.environ.get(
+                    "MODEL_GATEWAY_DASHBOARD_URL",
+                    "http://100.123.208.32:39010",
+                ),
+                "icon": "🔐",
+                "ready": True,
+            },
+        ],
+    },
 ]
 
 
