@@ -6,7 +6,9 @@ deploy-standard 里适用于本服务的几条，变成会当场变红的断言�
 每个用例的 docstring 写它防的是哪一条、以及那条是怎么被踩出来的。
 """
 import hashlib
+import io
 import pathlib
+import sys
 import tempfile
 import unittest
 from datetime import datetime
@@ -166,6 +168,78 @@ class PruneContentGateTests(unittest.TestCase):
         """路径认识、内容不认识——这正是「有人直接改了生产」的形状。"""
         edited = hashlib.sha256(b"SOMEONE HAND-EDITED PRODUCTION\n").hexdigest()
         self.assertNotIn(edited, self._module().historical_hashes("portal.py"))
+
+    def _temp_repo(self, tmp):
+        """造一个真 git 仓：main 上 A→C，side 分支上 B。返回三份内容的 sha256。
+
+        自带 origin（指向自己）以便 main() 里的 `git fetch origin` 能过——不为
+        测试在生产代码里开后门。
+        """
+        import subprocess as sp
+        run = lambda *a: sp.run(a, cwd=tmp, check=True, capture_output=True)
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "t@t")
+        run("git", "config", "user.name", "t")
+        out = {}
+        for name, content, branch in (("A", b"A\n", None), ("B", b"B\n", "side"),
+                                      ("C", b"C\n", "main")):
+            if branch == "side":
+                run("git", "checkout", "-qb", "side")
+            elif branch == "main":
+                run("git", "checkout", "-q", "main")
+            (pathlib.Path(tmp) / "f.txt").write_bytes(content)
+            run("git", "add", "-A")
+            run("git", "commit", "-qm", name)
+            out[name] = hashlib.sha256(content).hexdigest()
+        run("git", "remote", "add", "origin", tmp)
+        return out
+
+    def test_historical_hashes_is_scoped_to_the_ref_ancestry(self):
+        """`--all` 会把**任何分支**上的内容都算成「历史里找得到」。真机上撞出来的
+        形态（kg-hub-edit）：NAS 跑着旧 commit，目录里却有来自**更新**提交的文件
+        ——它不是孤儿，是**部署不完整的信号**，删掉等于把信号抹了。"""
+        import os
+        mod = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            sha = self._temp_repo(tmp)
+            cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                anc = mod.historical_hashes("f.txt", "main")
+                everywhere = mod.historical_hashes("f.txt", None)
+            finally:
+                os.chdir(cwd)
+        self.assertIn(sha["A"], anc)
+        self.assertIn(sha["C"], anc)
+        self.assertNotIn(sha["B"], anc)          # 侧分支的内容不在 main 的祖先链上
+        self.assertIn(sha["B"], everywhere)      # 但 --all 看得见它（只用于分类）
+
+    def test_list_prunable_uses_the_release_ref_not_all(self):
+        """光证明函数对没用——还得证明**有人在用它，并且传对了 ref**。
+        （kg-hub-edit 的变异验证里，「把判据退回 was_ever_tracked」没转红，就是因为
+        用例只验了函数本身、从没跑过调用点。）这里真跑 main()。"""
+        import os
+        from unittest import mock
+        mod = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            sha = self._temp_repo(tmp)
+            cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                with mock.patch.object(mod, "git_side", lambda ref: {}), \
+                     mock.patch.object(mod, "nas_side", lambda: {"f.txt": sha["B"]}), \
+                     mock.patch.object(sys, "argv",
+                                       ["x", "--list-prunable", "--ref", "main"]), \
+                     mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+                     mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                    rc = mod.main()
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(rc, 0)
+        # 侧分支的内容不该进可删清单……
+        self.assertEqual(out.getvalue().strip(), "")
+        # ……而且要说清它为什么被跳过，措辞不能写成「有人改了生产」
+        self.assertIn("不在 main 这条线上", err.getvalue())
 
     def test_the_gate_compares_content_not_just_the_path(self):
         """判据必须是内容是否可在历史中找到，不能退回成「这条路径曾被跟踪」。

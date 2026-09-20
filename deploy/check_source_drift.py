@@ -60,8 +60,16 @@ def was_ever_tracked(path: str) -> bool:
     return out.returncode == 0 and bool(out.stdout.strip())
 
 
-def historical_hashes(path: str) -> set:
-    """这条路径在 git 历史里出现过的**全部内容指纹**（sha256）。
+def historical_hashes(path: str, ref: str = None) -> set:
+    """这条路径在 **ref 这条祖先链**上出现过的全部内容指纹（sha256）。
+    `ref=None` 表示放宽到 `--all`（任何分支、任何提交），只用来分类、不用来放行。
+
+    范围必须是祖先链，不能是 `--all`（kg-hub-edit 会话在真机上撞出来的）：
+    NAS 跑着 49bc2d87，目录里却躺着来自**更新的** 9ef37b5 的文件——用 `--all` 查
+    「历史里找得到一模一样的内容」，于是判可删。可它不是孤儿，**是部署不完整的
+    信号**；删掉等于把信号抹了，下次照样发生而没人知道为什么。更一般地：`--all`
+    会把**任何分支**上的内容都算成可删，于是别人从分支拷一份到生产，发布就替他
+    删掉了。
 
     删除的判据是「NAS 上这一份，能在 git 历史里找到一模一样的内容」——比
     「这条路径曾被跟踪」更紧一档，而且紧的那一档正是要害：**被跟踪过 ≠ NAS 上
@@ -72,7 +80,8 @@ def historical_hashes(path: str) -> set:
     这条判据顺带把「从没被跟踪过」也覆盖了：没有历史版本 → 集合为空 → 永远不匹配。
     所以它是一条规则，不是两条。
     """
-    out = subprocess.run(["git", "log", "--all", "--format=%H", "--", path],
+    scope = ["--all"] if ref is None else [ref]
+    out = subprocess.run(["git", "log", *scope, "--format=%H", "--", path],
                          capture_output=True, text=True)
     if out.returncode != 0:
         return set()
@@ -189,12 +198,18 @@ def main() -> int:
         # 那份还等于历史里某一版。生产上手改过、git 又删了的文件只满足前者，删了
         # 那些改动就真没了。所以比的是内容指纹，不是路径是否出现过。
         for p in only_nas:
-            if got[p] in historical_hashes(p):
+            if got[p] in historical_hashes(p, args.ref):
                 print(p)
+            elif got[p] in historical_hashes(p, None):
+                # 内容真实存在，只是不在这条发布线上：多半是部署不完整，或有人
+                # 从别的分支拷了一份进生产。**它是信号，不是垃圾**——删掉等于把
+                # 信号抹了，下次照样发生而没人知道为什么。
+                print(f"跳过 {p}：这份内容在别的分支或更新的提交里能找到，但不在 "
+                      f"{args.ref} 这条线上——多半是部署不完整或有人从分支拷了一份，"
+                      "不是孤儿", file=sys.stderr)
             elif was_ever_tracked(p):
-                # 这一类最值得人看一眼：git 认识这条路径，但 NAS 上这份内容
-                # 哪一版都对不上——多半是有人直接改了生产。不删，报出来。
-                print(f"跳过 {p}：曾被 git 跟踪，但 NAS 上的内容与历史里任何一版都不同"
+                # git 认识这条路径，但这份内容在任何提交里都找不到。
+                print(f"跳过 {p}：曾被 git 跟踪，但这份内容在任何提交里都找不到"
                       "（疑似有人直接改过生产）", file=sys.stderr)
         return 0
 
