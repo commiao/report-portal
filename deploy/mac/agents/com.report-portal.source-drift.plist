@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  report-portal 源码漂移巡检（日更），判决写进 fleet-ops SessionStart 读的状态文件。
+
+  刻意不指向开发工作树：kg-hub 的同类 plist 把路径渲染成
+  /Users/mac/workspace_claudeCode/... ，那正是准则 20 点名的形态（13 个 launchd
+  直跑工作区 → 改完即生效 = 没有发布这一步，且所有会话被迫在同一棵树上改生产）。
+  这里跑 __HOME__/.local/share/report-portal/repo 这个私有 clone，只从 origin
+  快进；共享工作树里谁有在途改动，都不会悄悄改变这个探针的行为。
+
+  安装：deploy/mac/install-drift-probe.sh
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.report-portal.source-drift</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>cd "$HOME/.local/share/report-portal/repo" &amp;&amp; exec /usr/bin/python3 deploy/check_source_drift.py --status-file "$HOME/.cache/report-portal/source-drift.status"</string>
+    </array>
+
+    <!-- 巡检每天跑一次；hook 那边 36 小时算停更，留了一次失败的余量。 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>40</integer>
+    </dict>
+
+    <!-- 开机/登录后也补一次，免得关机一晚回来就是「已停更」。 -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/report-portal-source-drift.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/report-portal-source-drift.err.log</string>
+</dict>
+</plist>

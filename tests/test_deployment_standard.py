@@ -6,7 +6,9 @@ deploy-standard 里适用于本服务的几条，变成会当场变红的断言�
 每个用例的 docstring 写它防的是哪一条、以及那条是怎么被踩出来的。
 """
 import pathlib
+import tempfile
 import unittest
+from datetime import datetime
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -82,6 +84,49 @@ class BypassTests(unittest.TestCase):
         self.assertIn("exit 2", REDEPLOY)
         self.assertIn("已停用", REDEPLOY)
         self.assertNotIn("compose -p", REDEPLOY)
+
+
+class DriftStatusContractTests(unittest.TestCase):
+    """状态文件是 fleet-ops SessionStart 巡检读的契约，这里按它的解析方式实跑。
+
+    上面几条是静态断言（文本里有没有那一句）；这几条是真的调函数、真的解析，
+    因为格式写错不会有人发现——巡检只会显示成一条橙灯「状态读不懂」。
+    """
+
+    @staticmethod
+    def _module():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "portal_drift", ROOT / "deploy" / "check_source_drift.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _parse(self, path):
+        """完全照 ops-hook-context.sh 的读法：三段 tab 分隔 + ISO 时间。"""
+        at, verdict, detail = pathlib.Path(path).read_text("utf-8").strip().split("\t", 2)
+        datetime.fromisoformat(at.replace("Z", "+00:00"))  # 解析不了就当场抛
+        return verdict, detail
+
+    def test_status_file_matches_what_the_sweep_parses(self):
+        mod = self._module()
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d) / "sub" / "source-drift.status"   # 父目录不存在也要能写
+            mod.write_status(str(p), "ok", "16 个文件等于 origin/main")
+            verdict, detail = self._parse(p)
+        self.assertEqual(verdict, "ok")
+        self.assertEqual(detail, "16 个文件等于 origin/main")
+
+    def test_a_failed_check_is_not_written_as_ok(self):
+        """准则：「查不了」和「没漂」是两回事。写成 ok 的话，ssh 挂掉的那几天
+        SessionStart 会一直播报体检通过。"""
+        mod = self._module()
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d) / "s"
+            mod.write_status(str(p), "error", "取数失败：CalledProcessError")
+            verdict, _ = self._parse(p)
+        self.assertNotEqual(verdict, "ok")
+        self.assertNotEqual(verdict, "drift")   # 也不能混进「漂了」那一类
 
 
 class DriftDetectionTests(unittest.TestCase):

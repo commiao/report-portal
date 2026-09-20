@@ -16,13 +16,20 @@
     deploy/check_source_drift.py                 # 比 origin/main
     deploy/check_source_drift.py --ref <commit>
     deploy/check_source_drift.py --json
+    deploy/check_source_drift.py --status-file ~/.cache/report-portal/source-drift.status
 退出码：0 = 一致；1 = 有漂移；2 = 取数失败（不要把取数失败当成「一致」）。
+
+`--status-file` 写的是 fleet-ops SessionStart 巡检读的那份契约：
+`<ISO8601>\t<ok|drift|error>\t<一行详情>`。三件事按契约必须分开：
+「一致」「漂了」「这次没查成」——把第三种写成 ok，等于 ssh 一挂就播报体检通过。
 """
 import argparse
 import hashlib
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 NAS = "commiao@100.123.208.32"
 SRC = "/volume1/docker/report-portal-src"
@@ -73,18 +80,49 @@ def nas_side() -> dict:
     return out
 
 
+def write_status(path: str, verdict: str, detail: str) -> None:
+    """写 fleet-ops SessionStart 巡检读的状态文件。
+
+    时间戳是**这次真的查完**的时间，不是文件 mtime——巡检据它判「已停更」。
+    先写临时文件再 rename：半截文件会被巡检读成「状态读不懂」，而那是一条会
+    误导人的橙灯。
+    """
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(f"{at}\t{verdict}\t{detail}\n", encoding="utf-8")
+    tmp.replace(p)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ref", default="origin/main")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--status-file", default=None,
+                    help="把判决写成 fleet-ops 巡检的契约格式")
     args = ap.parse_args()
 
     try:
-        subprocess.run(["git", "fetch", "origin", "--quiet"], check=False)
+        # fetch 失败必须当「查不了」，不能当「一致/漂了」：拿陈旧的 origin/main 去比，
+        # NAS 上刚发布的新版本会被判成「内容不同」——一条查不出所以然的假红。
+        fetch = subprocess.run(["git", "fetch", "origin", "--quiet"],
+                               capture_output=True, text=True)
+        if fetch.returncode != 0:
+            msg = "拉不到 origin，主干基线是陈旧的，本次不作判决"
+            print(msg, file=sys.stderr)
+            if args.status_file:
+                write_status(args.status_file, "error", msg)
+            return 2
         want = git_side(args.ref)
         got = nas_side()
     except subprocess.CalledProcessError as exc:
-        print(f"取数失败，不作判决：{exc}", file=sys.stderr)
+        msg = f"取数失败，不作判决：{exc}"
+        print(msg, file=sys.stderr)
+        if args.status_file:
+            # 关键：写 error 而不是 ok。「查不了」和「没漂」是两回事，
+            # 混成一类会让 ssh 挂掉的那几天播报成体检通过。
+            write_status(args.status_file, "error", f"取数失败：{type(exc).__name__}")
         return 2
 
     only_git = sorted(set(want) - set(got))
@@ -114,6 +152,21 @@ def main() -> int:
                     print(f"⚠️ {label}（{len(items)}）：")
                     for p in items:
                         print(f"   - {p}")
+
+    if args.status_file:
+        if verdict["clean"]:
+            detail = f"{verdict['checked']} 个文件等于 {args.ref}"
+        else:
+            parts = []
+            for label, items in (("git 有 NAS 没有", only_git),
+                                 ("只在 NAS 上", only_nas),
+                                 ("内容不同", differs)):
+                if items:
+                    parts.append(f"{label} {len(items)}：{', '.join(items[:3])}"
+                                 + ("…" if len(items) > 3 else ""))
+            detail = "；".join(parts)
+        write_status(args.status_file, "ok" if verdict["clean"] else "drift", detail)
+
     return 0 if verdict["clean"] else 1
 
 

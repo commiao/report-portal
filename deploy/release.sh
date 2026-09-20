@@ -156,3 +156,16 @@ fi
 
 say "✅ $SHORT 已上线：$PORTAL_URL_"
 say "   回滚：deploy/release.sh rollback ${PREV:-<上一个 sha>}"
+
+# ---- 8. 刷新漂移判决（准则 10：能改变判决的动作，自己负责刷新它）-----------
+# 不刷的话，刚发完这一刻巡检仍在报发布前那条红——而它报的那些文件正是刚被这次
+# 发布对齐掉的。靠年龄阈值救不了：文件是几分钟前写的，看起来就是新鲜的。
+STATUS_FILE="${PORTAL_DRIFT_STATUS:-$HOME/.cache/report-portal/source-drift.status}"
+CHECKER="$REPO/deploy/check_source_drift.py"
+if [ -f "$CHECKER" ]; then
+  if python3 "$CHECKER" --status-file "$STATUS_FILE" >/dev/null 2>&1; then
+    say "   漂移判决已刷新：一致"
+  else
+    say "   漂移判决已刷新：仍有待处理项，见 $STATUS_FILE"
+  fi
+fi
