@@ -53,6 +53,18 @@ def run(cmd, **kw):
     return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw).stdout
 
 
+def was_ever_tracked(path: str) -> bool:
+    """这条路径在 git 历史里出现过吗？
+
+    自动删除的判据只能是「git 曾经跟踪、后来删掉」，不能是「git 里现在没有」。
+    后者的补集包含**生产独有但正在用**的文件，删掉就是把生产打掉。走历史查，
+    从没被跟踪过的东西天然落在范围外。
+    """
+    out = subprocess.run(["git", "log", "--all", "--oneline", "-1", "--", path],
+                         capture_output=True, text=True)
+    return out.returncode == 0 and bool(out.stdout.strip())
+
+
 def git_side(ref: str) -> dict:
     """{path: sha256} for everything in that commit."""
     out = {}
@@ -102,8 +114,9 @@ def main() -> int:
     ap.add_argument("--status-file", default=None,
                     help="把判决写成 fleet-ops 巡检的契约格式")
     ap.add_argument("--list-extra", action="store_true",
-                    help="只列「只在 NAS 上存在」的文件（每行一个），供 release.sh "
-                         "prune 使用——让「该删什么」和「报什么漂移」出自同一个定义")
+                    help="列出全部「只在 NAS 上存在」的文件（每行一个），报告用")
+    ap.add_argument("--list-prunable", action="store_true",
+                    help="列出其中**git 曾经跟踪、后来删掉**的那些——只有这批可以自动删")
     args = ap.parse_args()
 
     try:
@@ -142,11 +155,21 @@ def main() -> int:
     }
 
     if args.list_extra:
-        # 机器可读、只此一样东西：release.sh 照这份清单删。它和上面 only_nas 是
-        # 同一个变量，所以「该删什么」与「报什么漂移」不可能各自演化（准则 28）。
         for p in only_nas:
             print(p)
         return 0 if verdict["clean"] else 1
+
+    if args.list_prunable:
+        # 「该报什么漂移」和「该删什么」**不是同一个集合**，这一点要写死在这里：
+        # 报告要看见全部生产独有文件（准则 4）；而自动删只能碰「git 曾经跟踪、
+        # 后来删掉」的那些。判据写成「git 里没有的都删」会把生产打掉——kg-hub
+        # 实测过 deploy/hot_config_reconciliation.py：360 行、NAS 上在跑、git 里
+        # 连文件名都没有（T-0084 的约束就是为这个立的）。
+        # 从没被 git 跟踪过的东西，说明它不是这条发布线放上去的，轮不到发布来删。
+        for p in only_nas:
+            if was_ever_tracked(p):
+                print(p)
+        return 0
 
     if args.json:
         print(json.dumps(verdict, ensure_ascii=False, indent=2))

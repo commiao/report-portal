@@ -65,15 +65,25 @@ class ReleasePathTests(unittest.TestCase):
         """`git archive | tar xf` 只覆盖和新增，从不删除。不清的话，git 里删掉的
         文件会一直留在 NAS 上并可能被执行——「线上等于某个 commit」就只在「有
         什么」这一半成立（kg-hub 的 T-0084 至今开着）。"""
-        self.assertIn("--list-extra", RELEASE)
+        self.assertIn("--list-prunable", RELEASE)
         self.assertIn("rm -f --", RELEASE)
 
-    def test_prune_and_drift_share_one_definition(self):
-        """准则 28：「该删什么」和「报什么漂移」必须同源。release.sh 自己再写一份
-        排除清单的话，两边一旦分叉，要么删掉检测认为正常的文件，要么检测一直报
-        prune 不肯删的东西。"""
-        # 清单只能来自检测器，不能在 release.sh 里另起一套 ignore 规则
-        self.assertIn("check_source_drift.py", RELEASE)
+    def test_prune_never_deletes_on_the_bare_extras_list(self):
+        """T-0084 立的约束：**不要把判据写成「git 里没有的都删」**。
+        那个补集包含生产独有但正在用的文件——kg-hub 实测过
+        deploy/hot_config_reconciliation.py：360 行、NAS 上在跑、git 里连文件名
+        都没有，误删它就是把生产打掉。
+
+        所以「报什么漂移」和「该删什么」**刻意不是同一个集合**：报告要看见全部
+        生产独有文件（准则 4），删除只能碰 git 曾经跟踪、后来删掉的那些。
+        """
+        # 删这一步不能拿全量 extras
+        prune_block = RELEASE.split("[5.5]", 1)[1].split("[6/7]", 1)[0]
+        self.assertIn("--list-prunable", prune_block)
+        self.assertNotIn("--list-extra", prune_block)
+        # 而收窄的判据必须真的基于 git 历史，不是又一份手写排除清单
+        self.assertIn("def was_ever_tracked", DRIFT)
+        self.assertIn("git", DRIFT)
         for own_rule in ("IGNORE_EXACT", "IGNORE_PREFIX", "IGNORE_SUFFIX"):
             self.assertNotIn(own_rule, RELEASE)
 

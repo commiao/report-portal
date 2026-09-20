@@ -128,12 +128,17 @@ say "      $checked 个文件全部一致"
 # ---- 5.5 清掉 git 里已经没有的文件 -----------------------------------------
 # `git archive | tar xf` 只覆盖和新增，从不删除。不清的话，git 里删掉的文件会一直
 # 留在 NAS 上——而且可能被执行；于是「线上等于某个 commit」只在「有什么」这一半
-# 成立。该删哪些**不自己再写一份排除清单**：问漂移检测要（--list-extra 就是它
-# 报「只在 NAS 上存在」的那批），两边共用同一个定义，不会各自演化（准则 28）。
+# 成立。
+#
+# 判据是 **--list-prunable：git 曾经跟踪、后来删掉的那些**，不是「git 里现在没有
+# 的都删」。后者的补集包含生产独有但正在用的文件——kg-hub 实测过
+# deploy/hot_config_reconciliation.py：360 行、NAS 上在跑、git 里连文件名都没有，
+# 误删它就是把生产打掉（T-0084 立的约束）。从没被 git 跟踪过的东西不是这条发布线
+# 放上去的，轮不到发布来删；它们仍会被漂移检测报出来，交给人判断。
 # 删除已被第 3 步的整树备份覆盖（准则 5：备份 ⊇ 覆盖，现在「覆盖」含删除）。
-say "[5.5] 清理 git 里已不存在的文件"
+say "[5.5] 清理 git 曾经跟踪、现已删除的文件"
 set +e
-EXTRA=$(python3 "$REPO/deploy/check_source_drift.py" --ref "$SHA" --list-extra 2>/dev/null)
+EXTRA=$(python3 "$REPO/deploy/check_source_drift.py" --ref "$SHA" --list-prunable 2>/dev/null)
 EXTRA_RC=$?
 set -e
 # 「没有多余文件」和「这次没查成」必须分开报。混成一句的话，取数一挂就会播报
