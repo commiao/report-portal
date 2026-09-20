@@ -198,32 +198,62 @@ async def _gather():
         return await asyncio.gather(*[_fetch_source(client, s) for s in SOURCES])
 
 
+# Two view modes share ONE DOM: switching only swaps a class on <body>
+# (v-list / v-tile), so toggling is instant CSS with no re-render. The choice is
+# remembered in localStorage — needed because the page self-refreshes every 120s.
 _PORTAL_HTML = """<!doctype html><html lang=zh><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><meta http-equiv=refresh content=120>
 <title>报表门户</title>
 <style>:root{color-scheme:light dark}
 body{font-family:-apple-system,system-ui,"PingFang SC",sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;background:Canvas;color:CanvasText;line-height:1.6}
-h1{font-size:20px;font-weight:500;margin:.2rem 0}.sub{color:GrayText;font-size:13px;margin-bottom:1.5rem}
+h1{font-size:20px;font-weight:500;margin:.2rem 0}.sub{color:GrayText;font-size:13px}
+.bar{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:1.2rem}
+.views{display:flex;gap:6px;flex:none;padding-top:.3rem}
+.views button{font:inherit;font-size:12.5px;padding:4px 10px;border-radius:8px;cursor:pointer;
+border:1px solid color-mix(in srgb,CanvasText 20%,transparent);background:transparent;color:GrayText}
+.views button[aria-pressed=true]{background:color-mix(in srgb,CanvasText 10%,transparent);color:CanvasText}
 .src{font-size:13px;color:GrayText;margin:1.6rem 0 .5rem;display:flex;align-items:center;gap:8px}
 .src .dot{width:7px;height:7px;border-radius:50%}.ok{background:#2EA043}.bad{background:#D1242F}
 .src .err{color:#D1242F}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
-a.card{display:block;text-decoration:none;color:inherit;border:1px solid color-mix(in srgb,CanvasText 18%,transparent);border-radius:12px;padding:1rem 1.1rem}
+a.card{text-decoration:none;color:inherit;border:1px solid color-mix(in srgb,CanvasText 18%,transparent);border-radius:12px}
 a.card:hover{border-color:color-mix(in srgb,CanvasText 45%,transparent)}
-.t{font-size:15px;font-weight:500}.d{font-size:13px;color:GrayText;margin-top:4px}
 .soon{opacity:.5;pointer-events:none}.empty{color:GrayText;font-size:13px}
-.foot{color:GrayText;font-size:12px;margin-top:2.5rem}</style></head><body>
-<h1>报表门户</h1><div class=sub>多源报表 / 看板的统一入口 · 独立服务·按源聚合 · 每 120s 刷新</div>
+.foot{color:GrayText;font-size:12px;margin-top:2.5rem}
+.v-list .grid{display:flex;flex-direction:column;gap:8px}
+.v-list a.card{display:flex;align-items:center;gap:10px;padding:.55rem .9rem}
+.v-list .ic{font-size:16px;flex:none}
+.v-list .t{font-size:14px;font-weight:500;flex:none}
+.v-list .d{font-size:12.5px;color:GrayText;margin-left:auto;padding-left:14px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.v-tile .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:12px}
+.v-tile a.card{display:block;text-align:center;padding:1rem .6rem}
+.v-tile .ic{font-size:30px;line-height:1.25;display:block;margin-bottom:.4rem}
+.v-tile .t{font-size:13px;font-weight:500;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.v-tile .d{display:none}
+@media(max-width:520px){.v-list .d{display:none}}</style></head><body class=v-list>
+<div class=bar>
+<div><h1>报表门户</h1><div class=sub>多源报表 / 看板的统一入口 · 按源聚合 · 每 120s 刷新</div></div>
+<div class=views><button data-v=list aria-pressed=true>☰ 列表</button><button data-v=tile aria-pressed=false>▦ 缩略图</button></div>
+</div>
 <div id=body></div>
 <div class=foot>新增数据源：在 report-portal 的 PORTAL_SOURCES 加一条；新增报表：在对应源的 /portal_manifest 里加一张卡。</div>
 <script>var D=__DATA__;
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 document.getElementById('body').innerHTML=D.map(function(s){
-var head='<div class=src><span class="dot '+(s.ok?'ok':'bad')+'"></span>'+s.name+(s.ok?'':' <span class=err>· 暂不可达 ('+s.error+')</span>')+'</div>';
+var head='<div class=src><span class="dot '+(s.ok?'ok':'bad')+'"></span>'+esc(s.name)+(s.ok?'':' <span class=err>· 暂不可达 ('+esc(s.error)+')</span>')+'</div>';
 var body;
 if(!s.cards.length){body='<div class=empty>'+(s.ok?'该源暂无报表':'无法获取卡片')+'</div>';}
 else{body='<div class=grid>'+s.cards.map(function(r){
-return '<a class="card'+(r.ready?'':' soon')+'" href="'+r.url+'"><div class=t>'+r.icon+' '+r.name+(r.ready?'':' · 即将上线')+'</div><div class=d>'+r.desc+'</div></a>';}).join('')+'</div>';}
-return head+body;}).join('');</script></body></html>"""
+return '<a class="card'+(r.ready?'':' soon')+'" href="'+esc(r.url)+'" title="'+esc(r.name)+(r.desc?' — '+esc(r.desc):'')+'">'
++'<span class=ic>'+esc(r.icon)+'</span><span class=t>'+esc(r.name)+(r.ready?'':' · 即将上线')+'</span>'
++'<span class=d>'+esc(r.desc)+'</span></a>';}).join('')+'</div>';}
+return head+body;}).join('');
+var KEY='portal.view',BTN=document.querySelectorAll('.views button');
+function setView(v){document.body.className='v-'+v;
+Array.prototype.forEach.call(BTN,function(b){b.setAttribute('aria-pressed',String(b.dataset.v===v));});
+try{localStorage.setItem(KEY,v);}catch(e){}}
+var saved='list';try{saved=localStorage.getItem(KEY)||'list';}catch(e){}
+setView(saved==='tile'?'tile':'list');
+Array.prototype.forEach.call(BTN,function(b){b.onclick=function(){setView(b.dataset.v);};});</script></body></html>"""
 
 
 async def portal(request: Request) -> HTMLResponse:
