@@ -143,8 +143,14 @@ EXTRA_RC=$?
 set -e
 # 「没有多余文件」和「这次没查成」必须分开报。混成一句的话，取数一挂就会播报
 # 成「清理干净」——同一个病本次已经在 health 和巡检上各修过一遍了。
-if [ "$EXTRA_RC" = "2" ]; then
-  say "      ⚠️ 拿不到清单（检测退出 2），本次不删任何东西"
+#
+# 判据是「非 0」而不是「等于 2」。第一版写的是 `= 2`，只堵住了**预料到**的那种
+# 失败（检测自己判定拿不到指纹时主动 return 2）；而检查器崩掉（未捕获异常）给的
+# 是 rc=1，$EXTRA 同样为空，于是直接落进下面那句「没有多余文件」——正好就是上面
+# 三行注释警告的事。kg-hub-edit 会话复核时指出的。
+# 这一段的失败方向必须永远是「不删」，所以凡不是明确的成功都按没查成处理。
+if [ "$EXTRA_RC" != "0" ]; then
+  say "      ⚠️ 拿不到清单（检测退出 $EXTRA_RC），本次不删任何东西"
   say "         宁可留着让漂移检测继续报，也不在没查清时删生产上的文件"
 elif [ -z "$EXTRA" ]; then
   say "      没有多余文件"
@@ -223,9 +229,16 @@ say "   回滚：deploy/release.sh rollback ${PREV:-<上一个 sha>}"
 STATUS_FILE="${PORTAL_DRIFT_STATUS:-$HOME/.cache/report-portal/source-drift.status}"
 CHECKER="$REPO/deploy/check_source_drift.py"
 if [ -f "$CHECKER" ]; then
-  if python3 "$CHECKER" --status-file "$STATUS_FILE" >/dev/null 2>&1; then
-    say "   漂移判决已刷新：一致"
-  else
-    say "   漂移判决已刷新：仍有待处理项，见 $STATUS_FILE"
-  fi
+  set +e
+  python3 "$CHECKER" --status-file "$STATUS_FILE" >/dev/null 2>&1
+  DRIFT_RC=$?
+  set -e
+  # 同样按返回码分开说。原来写成「非 0 一律报『已刷新：仍有待处理项』」，
+  # 把「真有漂移」和「刷新压根没成功」混成一句——而准则 10 的要害就是这个动作
+  # 要对判决负责，刷失败了还说「已刷新」是假话。
+  case "$DRIFT_RC" in
+    0) say "   漂移判决已刷新：一致" ;;
+    1) say "   漂移判决已刷新：有漂移（或刷新中途失败）——以 $STATUS_FILE 的时间戳为准" ;;
+    *) say "   ⚠️ 漂移判决没刷成（退出 $DRIFT_RC）：$STATUS_FILE 里可能还是发布前那条，别拿它当结论" ;;
+  esac
 fi

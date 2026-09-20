@@ -101,10 +101,14 @@ class ReleasePathTests(unittest.TestCase):
         `if false` 之后，`EXTRA_RC` 和那句提示都还原样留在文件里，只查字符串
         在不在的写法当场放行了它。
         """
-        self.assertIn('EXTRA_RC=$?', RELEASE)                 # 真取了退出码
-        self.assertIn('[ "$EXTRA_RC" = "2" ]', RELEASE)       # 真拿它做了判断
+        self.assertIn('EXTRA_RC=$?', RELEASE)                  # 真取了退出码
+        # 判据必须是「非 0」，不能是「等于某个预料中的码」。第一版写成 `= "2"`，
+        # 只堵住了检测自己主动 return 2 的那种失败；检查器崩掉（未捕获异常）给的
+        # 是 rc=1，$EXTRA 同样为空，于是直接落进「没有多余文件」——正是本用例要
+        # 防的那句话。实测 python 未捕获异常退出码就是 1。
+        self.assertIn('[ "$EXTRA_RC" != "0" ]', RELEASE)
         # 而且这个判断必须排在「没有多余文件」那句之前，否则查不了会先被归成「干净」
-        guard = RELEASE.index('[ "$EXTRA_RC" = "2" ]')
+        guard = RELEASE.index('[ "$EXTRA_RC" != "0" ]')
         empty = RELEASE.index("没有多余文件")
         self.assertLess(guard, empty)
 
