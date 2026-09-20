@@ -150,14 +150,17 @@ say "      health=$code  portal=$pcode"
 # health 现在量的是「页面还做不做得出来」，所以把它的实质内容也打出来：
 # 只看 200 的话，degraded（某个源不可达）会悄悄上线，而那正是要让人看见的。
 if [ -n "$body" ]; then
-  say "      $(printf '%s' "$body" | python3 -c 'import sys,json
+  # 用 % 格式化而不是 f-string：整段 python 是裹在 shell 单引号里传进去的，
+  # f-string 里再出现转义引号会当场语法错，而外面一个 `|| echo` 会把它吞成
+  # 一句「解析不了」——实测就这么静默瞎了一次。
+  say "      $(printf '%s' "$body" | python3 -c 'import sys, json
 try:
-    d=json.load(sys.stdin)
+    d = json.load(sys.stdin)
 except Exception:
-    print("health 返回的不是 JSON"); raise SystemExit
-s=d.get("status")
-f=",".join(d.get("sources",{}).get("failed") or []) or "无"
-print(f"health.status={s} 卡片={d.get(\"cards\")} 不可达源={f}")' 2>/dev/null || echo 'health 内容解析不了')"
+    print("health 返回的不是 JSON")
+    raise SystemExit
+failed = ",".join(d.get("sources", {}).get("failed") or []) or "无"
+print("health.status=%s 卡片=%s 不可达源=%s" % (d.get("status"), d.get("cards"), failed))' 2>&1)"
 fi
 
 if [ "$running" != "$IMAGE:$SHORT" ] || [ "$code" != "200" ] || [ "$pcode" != "200" ]; then
