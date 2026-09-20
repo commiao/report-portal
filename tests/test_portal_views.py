@@ -17,6 +17,21 @@ class PortalViewTests(unittest.TestCase):
         self.assertIn("<body class=v-list>", html)
         self.assertIn(".v-tile .d{display:none}", html)
 
+    def test_tile_mode_flattens_cards_across_sources(self):
+        """Every source currently holds exactly one card. If tile mode kept the
+        per-source grouping it would render one lonely tile per row, so it must
+        render a single grid over all sources and demote the source to a caption."""
+        html = portal._PORTAL_HTML
+        self.assertIn("function renderTile()", html)
+        self.assertIn("function renderList()", html)
+        # renderTile builds ONE grid, outside the per-source loop.
+        tile_body = html.split("function renderTile()", 1)[1].split("var KEY=", 1)[0]
+        self.assertEqual(tile_body.count("<div class=grid>"), 1)
+        # Only the grouped view emits source headers.
+        self.assertNotIn("class=src", tile_body)
+        self.assertIn(".v-tile .s{display:block", html)
+        self.assertIn(".v-list .s{display:none}", html)
+
     def test_view_choice_survives_the_auto_refresh(self):
         """The page reloads itself every 120s, so the choice must be persisted —
         otherwise switching to tiles silently reverts a couple of minutes later."""

@@ -198,9 +198,14 @@ async def _gather():
         return await asyncio.gather(*[_fetch_source(client, s) for s in SOURCES])
 
 
-# Two view modes share ONE DOM: switching only swaps a class on <body>
-# (v-list / v-tile), so toggling is instant CSS with no re-render. The choice is
-# remembered in localStorage — needed because the page self-refreshes every 120s.
+# Two view modes over the same data:
+#   v-list — grouped by source (header + rows), descriptions visible.
+#   v-tile — ALL cards flattened into one flowing grid, source demoted to a
+#            caption on each tile. Flattening matters: every source currently
+#            holds a single card, so keeping the grouping in tile mode renders
+#            one lonely tile per row and wastes the whole screen.
+# Switching re-renders the body and swaps the <body> class. The choice is kept
+# in localStorage — required, because the page self-refreshes every 120s.
 _PORTAL_HTML = """<!doctype html><html lang=zh><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1"><meta http-equiv=refresh content=120>
 <title>报表门户</title>
@@ -215,20 +220,23 @@ border:1px solid color-mix(in srgb,CanvasText 20%,transparent);background:transp
 .src{font-size:13px;color:GrayText;margin:1.6rem 0 .5rem;display:flex;align-items:center;gap:8px}
 .src .dot{width:7px;height:7px;border-radius:50%}.ok{background:#2EA043}.bad{background:#D1242F}
 .src .err{color:#D1242F}
-a.card{text-decoration:none;color:inherit;border:1px solid color-mix(in srgb,CanvasText 18%,transparent);border-radius:12px}
+.card{text-decoration:none;color:inherit;border:1px solid color-mix(in srgb,CanvasText 18%,transparent);border-radius:12px}
 a.card:hover{border-color:color-mix(in srgb,CanvasText 45%,transparent)}
 .soon{opacity:.5;pointer-events:none}.empty{color:GrayText;font-size:13px}
 .foot{color:GrayText;font-size:12px;margin-top:2.5rem}
 .v-list .grid{display:flex;flex-direction:column;gap:8px}
-.v-list a.card{display:flex;align-items:center;gap:10px;padding:.55rem .9rem}
+.v-list .card{display:flex;align-items:center;gap:10px;padding:.55rem .9rem}
 .v-list .ic{font-size:16px;flex:none}
 .v-list .t{font-size:14px;font-weight:500;flex:none}
 .v-list .d{font-size:12.5px;color:GrayText;margin-left:auto;padding-left:14px;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.v-list .s{display:none}
 .v-tile .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:12px}
-.v-tile a.card{display:block;text-align:center;padding:1rem .6rem}
+.v-tile .card{display:block;text-align:center;padding:1rem .6rem}
 .v-tile .ic{font-size:30px;line-height:1.25;display:block;margin-bottom:.4rem}
 .v-tile .t{font-size:13px;font-weight:500;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .v-tile .d{display:none}
+.v-tile .s{display:block;font-size:11px;color:GrayText;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.v-tile .dead{opacity:.55;cursor:default}
 @media(max-width:520px){.v-list .d{display:none}}</style></head><body class=v-list>
 <div class=bar>
 <div><h1>报表门户</h1><div class=sub>多源报表 / 看板的统一入口 · 按源聚合 · 每 120s 刷新</div></div>
@@ -238,17 +246,25 @@ a.card:hover{border-color:color-mix(in srgb,CanvasText 45%,transparent)}
 <div class=foot>新增数据源：在 report-portal 的 PORTAL_SOURCES 加一条；新增报表：在对应源的 /portal_manifest 里加一张卡。</div>
 <script>var D=__DATA__;
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
-document.getElementById('body').innerHTML=D.map(function(s){
-var head='<div class=src><span class="dot '+(s.ok?'ok':'bad')+'"></span>'+esc(s.name)+(s.ok?'':' <span class=err>· 暂不可达 ('+esc(s.error)+')</span>')+'</div>';
-var body;
-if(!s.cards.length){body='<div class=empty>'+(s.ok?'该源暂无报表':'无法获取卡片')+'</div>';}
-else{body='<div class=grid>'+s.cards.map(function(r){
+function card(r,srcName){
 return '<a class="card'+(r.ready?'':' soon')+'" href="'+esc(r.url)+'" title="'+esc(r.name)+(r.desc?' — '+esc(r.desc):'')+'">'
 +'<span class=ic>'+esc(r.icon)+'</span><span class=t>'+esc(r.name)+(r.ready?'':' · 即将上线')+'</span>'
-+'<span class=d>'+esc(r.desc)+'</span></a>';}).join('')+'</div>';}
-return head+body;}).join('');
-var KEY='portal.view',BTN=document.querySelectorAll('.views button');
++'<span class=d>'+esc(r.desc)+'</span><span class=s>'+esc(srcName)+'</span></a>';}
+function renderList(){return D.map(function(s){
+var head='<div class=src><span class="dot '+(s.ok?'ok':'bad')+'"></span>'+esc(s.name)+(s.ok?'':' <span class=err>· 暂不可达 ('+esc(s.error)+')</span>')+'</div>';
+var body=s.cards.length?'<div class=grid>'+s.cards.map(function(r){return card(r,s.name);}).join('')+'</div>'
+:'<div class=empty>'+(s.ok?'该源暂无报表':'无法获取卡片')+'</div>';
+return head+body;}).join('');}
+function renderTile(){var out=[];
+D.forEach(function(s){
+if(s.cards.length){s.cards.forEach(function(r){out.push(card(r,s.name));});}
+else{out.push('<span class="card dead" title="'+esc(s.name)+(s.ok?' — 暂无报表':' — 暂不可达 ('+esc(s.error)+')')+'">'
++'<span class=ic>'+(s.ok?'📭':'⚠️')+'</span><span class=t>'+esc(s.name)+'</span>'
++'<span class=s>'+(s.ok?'暂无报表':'暂不可达')+'</span></span>');}});
+return '<div class=grid>'+out.join('')+'</div>';}
+var KEY='portal.view',BTN=document.querySelectorAll('.views button'),BODY=document.getElementById('body');
 function setView(v){document.body.className='v-'+v;
+BODY.innerHTML=(v==='tile'?renderTile():renderList());
 Array.prototype.forEach.call(BTN,function(b){b.setAttribute('aria-pressed',String(b.dataset.v===v));});
 try{localStorage.setItem(KEY,v);}catch(e){}}
 var saved='list';try{saved=localStorage.getItem(KEY)||'list';}catch(e){}
