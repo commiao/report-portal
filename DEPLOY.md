@@ -55,10 +55,41 @@ deploy/check_source_drift.py          # 比 origin/main，0=一致 1=有漂移 2
 
 - **`git archive` 不删除**：git 里删掉的文件会留在 NAS 上（kg-hub 同病，其 T-0084）。
   漂移检测能抓到（`只在 NAS 上存在`），但 release 本身不 prune。
-- **`/health` 量活着不量干活**（准则 9）：它只回配置里的源 id，不校验源真的抓得到。
-  页面上每个源有红绿点，但 health 端点本身不体现。
-- **巡检未接入 SessionStart**：kg-hub / credvault 的漂移检测挂在 fleet-ops 的
-  hook 上，本服务还要手工跑。
+（`/health` 量干活、漂移巡检接入 SessionStart 已补齐，见下。）
+
+## /health 量的是干活（准则 9）
+
+它**真跑一遍聚合 + 渲染**（和页面走同一个 `render_portal`，准则 28），然后按
+「这件事该由谁负责」分三档：
+
+| 档 | HTTP | 什么时候 |
+|---|---|---|
+| `ok` | 200 | 所有源都拿到了 |
+| `degraded` | **200** | 某些源不可达——那是门户如实上报的**数据**，不是它的故障 |
+| `down` | 503 | 聚合/渲染抛了，或一张卡都聚合不到——门户自己干不了活 |
+
+`degraded` 刻意不 503：否则别人家面板停机会让 release.sh 把门户自动回滚掉。
+返回体给真数出来的 `cards` 数、`sources.failed` 列表、渲染字节数和耗时。
+
+**它能抓到的一种静默故障**：模板里把 `__DATA__` 占位符改名后，`.replace` 是一次
+静默无操作——页面照常 200、结构完整、一张卡都没有。字符串替换不报错，所以
+`render_portal` 自己校验「数据真的嵌进去了」，不然就抛（页面也一起受保护，
+而不是端出一个空白的 200）。
+
+## 漂移巡检（SessionStart 自动摆出来）
+
+```sh
+deploy/mac/install-drift-probe.sh     # 装 launchd 日更探针（幂等）
+```
+判决写 `~/.cache/report-portal/source-drift.status`，fleet-ops 的
+`ops-hook-context.sh` 每次开会话读它。探针跑 `~/.local/share/report-portal/repo`
+这个**私有 clone**，不指向共享开发工作树（准则 20）。`release.sh` 成功后会自己
+刷新判决（准则 10）。
+
+## 已知缺口（诚实记账）
+
+- **`git archive` 不删除**：git 里删掉的文件会留在 NAS 上（kg-hub 同病，其 T-0084）。
+  漂移检测能抓到（`只在 NAS 上存在`），但 release 本身不 prune。
 
 ## 加数据源/报表（回顾）
 

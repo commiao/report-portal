@@ -137,13 +137,28 @@ running=$(on_nas "$DK inspect '$CONTAINER' --format '{{.Config.Image}}' 2>/dev/n
 say "      容器镜像：$running"
 
 code=""
+body=""
 for _ in 1 2 3 4 5; do
-  code=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "$HEALTH_URL" || true)
+  body=$(curl -s -m 8 -w '\n%{http_code}' "$HEALTH_URL" || true)
+  code=$(printf '%s' "$body" | tail -1)
+  body=$(printf '%s' "$body" | sed '$d')
   [ "$code" = "200" ] && break
   sleep 3
 done
 pcode=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$PORTAL_URL_" || true)
 say "      health=$code  portal=$pcode"
+# health 现在量的是「页面还做不做得出来」，所以把它的实质内容也打出来：
+# 只看 200 的话，degraded（某个源不可达）会悄悄上线，而那正是要让人看见的。
+if [ -n "$body" ]; then
+  say "      $(printf '%s' "$body" | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    print("health 返回的不是 JSON"); raise SystemExit
+s=d.get("status")
+f=",".join(d.get("sources",{}).get("failed") or []) or "无"
+print(f"health.status={s} 卡片={d.get(\"cards\")} 不可达源={f}")' 2>/dev/null || echo 'health 内容解析不了')"
+fi
 
 if [ "$running" != "$IMAGE:$SHORT" ] || [ "$code" != "200" ] || [ "$pcode" != "200" ]; then
   if [ -n "$PREV" ] && [ "$PREV" != "$SHORT" ]; then

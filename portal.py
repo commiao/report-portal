@@ -27,6 +27,7 @@ wires up kg-hub so the service runs out of the box.
 import asyncio
 import json
 import os
+import time
 
 import httpx
 from starlette.applications import Starlette
@@ -272,13 +273,80 @@ setView(saved==='tile'?'tile':'list');
 Array.prototype.forEach.call(BTN,function(b){b.onclick=function(){setView(b.dataset.v);};});</script></body></html>"""
 
 
+PLACEHOLDER = "__DATA__"
+
+
+def render_portal(data: list) -> str:
+    """把聚合结果渲染成页面。
+
+    portal() 和 health() 都走这一个函数，而不是各自 `.replace` 一遍：判断的两端
+    取自不同来源时，迟早会报一件不存在的事（准则 28）。health 要是渲染的是另一
+    条路径，它验证的就不是用户实际拿到的东西。
+
+    替换没生效就**抛**，不返回半成品：模板里一旦把 `__DATA__` 改名，`.replace`
+    是一次静默无操作——页面照常 200、结构完整、一张卡都没有。字符串替换不会报
+    错，所以必须在这里自己查。查的是「数据真的嵌进去了」而不是「占位符还在不在」：
+    占位符被改名之后，html 里本来就找不到旧名字，按后者查恰好漏掉要抓的那种。
+    """
+    payload = json.dumps(data, ensure_ascii=False)
+    html = _PORTAL_HTML.replace(PLACEHOLDER, payload)
+    if payload not in html:
+        raise RuntimeError(
+            f"模板里没有 {PLACEHOLDER} 占位符，数据没被嵌进页面（页面会渲染成空的）")
+    return html
+
+
 async def portal(request: Request) -> HTMLResponse:
-    data = await _gather()
-    return HTMLResponse(_PORTAL_HTML.replace("__DATA__", json.dumps(data, ensure_ascii=False)))
+    return HTMLResponse(render_portal(await _gather()))
 
 
 async def health(request: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok", "sources": [s.get("id") for s in SOURCES]})
+    """量的是「这个门户现在还能不能把页面做出来」，不是「进程还活着吗」。
+
+    原来这里回显 `SOURCES` 里的 id —— 聚合坏了、渲染坏了、模板占位符被改名，它
+    照样 200 ok。那正是准则 9 的三个出处：kg-hub 日报读一个已退役组件的水位线，
+    96 天每天都报「系统正常在线」；网关 /health/ready 返回 ok 而每一次真实调用
+    都 503；refinery status.json 的时间戳每轮都刷新，而里面大半字段是上一个容器
+    留下的。
+
+    三档的分界线是**这件事该由谁负责**：
+      down      聚合抛了、或渲染出来的东西不能用 —— 门户自己坏了（503）
+      degraded  某些源不可达 —— 那是门户如实上报的数据，不是它的故障（200）
+      ok        全部源都拿到了
+    degraded 刻意不 503：门户的活是聚合与导航，别人家面板停机不该让 release.sh
+    把门户自动回滚掉。
+    """
+    started = time.monotonic()
+    try:
+        data = await _gather()
+        html = render_portal(data)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            {"status": "down", "reason": "聚合或渲染抛异常",
+             "error": f"{type(exc).__name__}: {exc}"},
+            status_code=503,
+        )
+
+    failed = [s["id"] for s in data if not s.get("ok")]
+    cards = sum(len(s.get("cards") or []) for s in data)
+
+    # 渲染是否真的把数据嵌进去了，由 render_portal 自己把关（替换没生效会抛，
+    # 上面的 except 接住）。这里只剩「聚合出来是空的」：页面还是 200、结构完整、
+    # 一张卡都没有——活着但不干活。
+    if cards == 0:
+        return JSONResponse(
+            {"status": "down", "reason": "一张卡片都聚合不到",
+             "sources": {"total": len(data), "failed": failed}, "cards": 0},
+            status_code=503,
+        )
+
+    return JSONResponse({
+        "status": "degraded" if failed else "ok",
+        "sources": {"total": len(data), "ok": len(data) - len(failed), "failed": failed},
+        "cards": cards,
+        "rendered_bytes": len(html),
+        "took_ms": round((time.monotonic() - started) * 1000),
+    })
 
 
 app = Starlette(
