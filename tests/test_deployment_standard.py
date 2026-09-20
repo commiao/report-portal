@@ -114,6 +114,28 @@ class ReleasePathTests(unittest.TestCase):
         empty = RELEASE.index("没有多余文件")
         self.assertLess(guard, empty)
 
+    def test_releases_are_serialised(self):
+        """两个发布交错会互相删文件——第 5.5 步现在会**删**东西，而这个仓有明确的
+        多 actor 撞车史。形态很具体：A 刚 archive 落地还没走完，B 的 prune 看到那些
+        文件不在自己那个 ref 的祖先链上，就把 A 刚放上去的删了。"""
+        self.assertIn("mkdir '$LOCK'", RELEASE)        # mkdir 是原子的
+        self.assertIn("trap release_lock EXIT", RELEASE)
+        # 发布和回滚都改 NAS，两条路径都必须串行化
+        self.assertEqual(RELEASE.count("acquire_lock\n") + RELEASE.count("acquire_lock  "), 2)
+
+    def test_the_lock_is_taken_before_anything_on_the_nas_changes(self):
+        """锁要是排在备份/落地之后，加它就没意义了。"""
+        self.assertLess(RELEASE.index("acquire_lock\nPREV="), RELEASE.index("tar czf"))
+
+    def test_only_releases_a_lock_it_actually_took(self):
+        """抢占失败时若照样 rm，等于把**别人正在用的**锁删掉——比没有锁更糟。"""
+        body = RELEASE.split("release_lock() {", 1)[1].split("}", 1)[0]
+        self.assertIn('[ "$lock_acquired" = 1 ] || return 0', body)
+
+    def test_a_stale_lock_can_be_taken_over(self):
+        """一次崩溃就把发布路径永久堵死，比并发更糟。"""
+        self.assertIn("-mmin +40", RELEASE)
+
     def test_has_a_rollback_path(self):
         """准则 6/7：带着没有退路的发布切生产，就是 kg-hub「切了之后回不来」那种
         形态。本服务无状态，回滚 = 标签指回去再 up。"""

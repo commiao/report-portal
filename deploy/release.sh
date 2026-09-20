@@ -35,9 +35,43 @@ PORTAL_URL_="${PORTAL_URL:-http://100.123.208.32:17172/portal}"
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=20)
 
+LOCK="$SRC/.release.lock"
+lock_acquired=0
+
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 on_nas() { ssh "${SSH_OPTS[@]}" "$NAS" "$@"; }
+
+# ---- 发布锁：两个发布交错会互相删文件 --------------------------------------
+# 这个仓有明确的多 actor 撞车史（见 DEPLOY.md 开头），而第 5.5 步现在会**删**
+# 文件。两个发布交错时的形态很具体：A 刚 archive 落地、还没走完，B 的 prune 看到
+# 那些文件不在自己发的那个 ref 的祖先链上，就把 A 刚放上去的删了——事后谁都说不清
+# 那个文件为什么没了。kg-hub 真机上撞见过同形的窗口（发布中的文件被判成孤儿）。
+# 用 mkdir 而不是文件存在性判断：mkdir 是原子的，两个并发只有一个能建成。
+acquire_lock() {
+  on_nas "
+    if mkdir '$LOCK' 2>/dev/null; then
+      printf '%s %s %s\n' \"\$(date -Iseconds)\" '$(hostname -s)' \"\$\$\" > '$LOCK/owner'
+      exit 0
+    fi
+    # 超时锁要能抢占，否则一次崩溃就把发布路径永久堵死（比并发更糟）。
+    if [ -n \"\$(find '$LOCK' -maxdepth 0 -mmin +40 2>/dev/null)\" ]; then
+      rm -rf '$LOCK'; mkdir '$LOCK'
+      printf '%s %s %s (抢占了超时的旧锁)\n' \"\$(date -Iseconds)\" '$(hostname -s)' \"\$\$\" > '$LOCK/owner'
+      exit 0
+    fi
+    echo \"持有者：\$(cat '$LOCK/owner' 2>/dev/null)\" >&2
+    exit 1
+  " || die "取不到发布锁——另一个发布正在进行（超过 40 分钟的陈旧锁会被自动抢占）"
+  lock_acquired=1
+}
+
+# 只释放**自己拿到的**那把锁：抢占失败时若照样 rm，等于把别人正在用的锁删掉。
+release_lock() {
+  [ "$lock_acquired" = 1 ] || return 0
+  on_nas "rm -rf '$LOCK'" >/dev/null 2>&1 || true
+}
+trap release_lock EXIT
 
 REF="origin/main"
 DRY=0
@@ -57,6 +91,7 @@ done
 # ---- 回滚：只切标签，不重建（镜像必须已在盘上）-----------------------------
 if [ "$MODE" = "rollback" ]; then
   [ -n "$ROLLBACK_SHA" ] || die "rollback 需要一个镜像标签（sha）"
+  acquire_lock   # 回滚也写 .env、也重启容器，和发布互斥
   on_nas "$DK image inspect $IMAGE:$ROLLBACK_SHA >/dev/null 2>&1" \
     || die "NAS 上没有镜像 $IMAGE:$ROLLBACK_SHA，无法回滚到它"
   say "回滚到 $IMAGE:$ROLLBACK_SHA"
@@ -88,7 +123,8 @@ if [ "$DRY" = "1" ]; then
   exit 0
 fi
 
-# ---- 2. 记下回滚点（准则 6/7）----------------------------------------------
+# ---- 2. 取发布锁 + 记下回滚点（准则 6/7）-----------------------------------
+acquire_lock
 PREV=$(on_nas "grep '^PORTAL_IMAGE_TAG=' $SRC/.env 2>/dev/null | cut -d= -f2-" || true)
 say "[2/7] 回滚点：${PREV:-<无，首次按准则发布>}"
 
