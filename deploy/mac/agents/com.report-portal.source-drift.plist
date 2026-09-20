@@ -16,11 +16,20 @@
     <key>Label</key>
     <string>com.report-portal.source-drift</string>
 
+    <!--
+      退出码要按「这个作业跑成了没有」来给，不是按「有没有漂移」。
+      检查器的 CLI 语义是 0=一致 1=有漂移 2=查不了，给人和脚本用正好；但直接把
+      它交给 launchd 的话，一旦真查出漂移，装置健康检查就会把它报成
+      `last exit code: 1` 的故障作业——探针明明干得好好的。实测过：同一个漂移
+      同时冒出一条正确的🔴和一条误导的「作业出错」，而后者会教人忽略这条线。
+      所以：0/1 都算跑成（判决在状态文件里），只有 2（拿不到指纹、判不了）才
+      让作业显示为失败——那时候它确实坏了。
+    -->
     <key>ProgramArguments</key>
     <array>
         <string>/bin/sh</string>
         <string>-c</string>
-        <string>cd "$HOME/.local/share/report-portal/repo" &amp;&amp; exec /usr/bin/python3 deploy/check_source_drift.py --status-file "$HOME/.cache/report-portal/source-drift.status"</string>
+        <string>cd "$HOME/.local/share/report-portal/repo" &amp;&amp; /usr/bin/python3 deploy/check_source_drift.py --status-file "$HOME/.cache/report-portal/source-drift.status"; rc=$?; [ $rc -le 1 ] &amp;&amp; exit 0; exit $rc</string>
     </array>
 
     <!-- 巡检每天跑一次；hook 那边 36 小时算停更，留了一次失败的余量。 -->
