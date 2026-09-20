@@ -5,6 +5,7 @@ deploy-standard 里适用于本服务的几条，变成会当场变红的断言�
 
 每个用例的 docstring 写它防的是哪一条、以及那条是怎么被踩出来的。
 """
+import hashlib
 import pathlib
 import tempfile
 import unittest
@@ -130,6 +131,53 @@ class BypassTests(unittest.TestCase):
         self.assertIn("exit 2", REDEPLOY)
         self.assertIn("已停用", REDEPLOY)
         self.assertNotIn("compose -p", REDEPLOY)
+
+
+class PruneContentGateTests(unittest.TestCase):
+    """删除的判据是「NAS 上这份内容能在 git 历史里找到一模一样的」，
+    比「这条路径曾被跟踪」紧一档。
+
+    紧的那一档是 kg-hub-edit 会话指出的洞：被跟踪过 ≠ NAS 上那份还等于历史里
+    某一版。生产上被手改过、git 后来又删掉的文件只满足前者；删了它，那些改动
+    就真没了（本仓有发布前整树备份兜底，但那是静默的——没人会知道去翻）。
+    """
+
+    @staticmethod
+    def _module():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "portal_drift2", ROOT / "deploy" / "check_source_drift.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_a_path_git_never_had_has_no_recoverable_content(self):
+        """从没进过 git 的文件——生产独有、可能正在用——永远不会进可删清单。"""
+        self.assertEqual(self._module().historical_hashes("NEVER_EXISTED_xyz.py"), set())
+
+    def test_a_tracked_path_exposes_its_historical_versions(self):
+        self.assertTrue(self._module().historical_hashes("portal.py"))
+
+    def test_content_never_committed_is_not_recoverable(self):
+        """路径认识、内容不认识——这正是「有人直接改了生产」的形状。"""
+        edited = hashlib.sha256(b"SOMEONE HAND-EDITED PRODUCTION\n").hexdigest()
+        self.assertNotIn(edited, self._module().historical_hashes("portal.py"))
+
+    def test_the_gate_compares_content_not_just_the_path(self):
+        """判据必须是内容是否可在历史中找到，不能退回成「这条路径曾被跟踪」。
+
+        断言的是**放行那一行本身**，不是「这些字眼在不在」：第一版写成
+        `assertNotIn("if was_ever_tracked", block)`，而代码里的 `elif
+        was_ever_tracked` 恰好包含这个子串，测试当场自己红了——同一天里
+        `assertIn` 的子串语义已经第三次咬人（前两次是 `.v-tile .gridX` 和
+        注释里的 `merge-base --is-ancestor`）。
+        """
+        drift_src = (ROOT / "deploy" / "check_source_drift.py").read_text(encoding="utf-8")
+        block = drift_src.split("if args.list_prunable:", 1)[1].split("if args.json:", 1)[0]
+        loop = block.split("for p in only_nas:", 1)[1]
+        gate = next(l.strip() for l in loop.splitlines() if l.strip().startswith("if "))
+        self.assertIn("historical_hashes", gate)      # 放行看的是内容能否在历史里找到
+        self.assertNotIn("was_ever_tracked", gate)    # 「曾被跟踪」只配解释为什么跳过
 
 
 class DriftStatusContractTests(unittest.TestCase):

@@ -54,15 +54,34 @@ def run(cmd, **kw):
 
 
 def was_ever_tracked(path: str) -> bool:
-    """这条路径在 git 历史里出现过吗？
-
-    自动删除的判据只能是「git 曾经跟踪、后来删掉」，不能是「git 里现在没有」。
-    后者的补集包含**生产独有但正在用**的文件，删掉就是把生产打掉。走历史查，
-    从没被跟踪过的东西天然落在范围外。
-    """
+    """这条路径在 git 历史里出现过吗？（只用来把跳过的原因说清楚）"""
     out = subprocess.run(["git", "log", "--all", "--oneline", "-1", "--", path],
                          capture_output=True, text=True)
     return out.returncode == 0 and bool(out.stdout.strip())
+
+
+def historical_hashes(path: str) -> set:
+    """这条路径在 git 历史里出现过的**全部内容指纹**（sha256）。
+
+    删除的判据是「NAS 上这一份，能在 git 历史里找到一模一样的内容」——比
+    「这条路径曾被跟踪」更紧一档，而且紧的那一档正是要害：**被跟踪过 ≠ NAS 上
+    那份还等于历史里某一版**。生产上被手改过、git 后来又删掉的文件，只满足前者；
+    删了它，那些改动就真没了（report-portal 这边有发布前整树备份兜底，但那是
+    静默的——没人会知道去翻备份，等于悄悄毁掉一份唯一的东西）。
+
+    这条判据顺带把「从没被跟踪过」也覆盖了：没有历史版本 → 集合为空 → 永远不匹配。
+    所以它是一条规则，不是两条。
+    """
+    out = subprocess.run(["git", "log", "--all", "--format=%H", "--", path],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        return set()
+    shas = set()
+    for commit in out.stdout.split():
+        blob = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True)
+        if blob.returncode == 0:
+            shas.add(hashlib.sha256(blob.stdout).hexdigest())
+    return shas
 
 
 def git_side(ref: str) -> dict:
@@ -161,14 +180,22 @@ def main() -> int:
 
     if args.list_prunable:
         # 「该报什么漂移」和「该删什么」**不是同一个集合**，这一点要写死在这里：
-        # 报告要看见全部生产独有文件（准则 4）；而自动删只能碰「git 曾经跟踪、
-        # 后来删掉」的那些。判据写成「git 里没有的都删」会把生产打掉——kg-hub
-        # 实测过 deploy/hot_config_reconciliation.py：360 行、NAS 上在跑、git 里
-        # 连文件名都没有（T-0084 的约束就是为这个立的）。
-        # 从没被 git 跟踪过的东西，说明它不是这条发布线放上去的，轮不到发布来删。
+        # 报告要看见全部生产独有文件（准则 4）；而自动删只能碰**能在 git 历史里
+        # 找到一模一样内容**的那些。判据写成「git 里没有的都删」会把生产打掉——
+        # kg-hub 实测过 deploy/hot_config_reconciliation.py：360 行、NAS 上在跑、
+        # git 里连文件名都没有（T-0084 的约束就是为这个立的）。
+        #
+        # 只查「曾被跟踪」还不够（kg-hub-edit 会话指出的洞）：被跟踪过 ≠ NAS 上
+        # 那份还等于历史里某一版。生产上手改过、git 又删了的文件只满足前者，删了
+        # 那些改动就真没了。所以比的是内容指纹，不是路径是否出现过。
         for p in only_nas:
-            if was_ever_tracked(p):
+            if got[p] in historical_hashes(p):
                 print(p)
+            elif was_ever_tracked(p):
+                # 这一类最值得人看一眼：git 认识这条路径，但 NAS 上这份内容
+                # 哪一版都对不上——多半是有人直接改了生产。不删，报出来。
+                print(f"跳过 {p}：曾被 git 跟踪，但 NAS 上的内容与历史里任何一版都不同"
+                      "（疑似有人直接改过生产）", file=sys.stderr)
         return 0
 
     if args.json:
