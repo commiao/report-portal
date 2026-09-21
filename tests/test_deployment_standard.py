@@ -513,6 +513,47 @@ class DeployedCommitBaselineTests(unittest.TestCase):
         # 取数适配器读的必须是 release.sh 自己写的那个标记
         self.assertIn("PORTAL_IMAGE_TAG", src)
 
+    def test_release_refuses_to_run_under_sh_or_zsh(self):
+        """用错 shell 要在**动 NAS 之前**就停，不是跑到一半再炸。
+
+        2026-09-21 的真实代价：`sh deploy/release.sh` 死在第 5 步的进程替换上，
+        而 bash 边解析边执行，前四步已经跑完——备份做了、archive 落地了、镜像
+        标签还没换。生产停在「文件是新 commit、跑着的是旧镜像」的半发布态。
+
+        两个条件都要查：macOS 的 sh 就是 bash 的 POSIX 模式，**照样设
+        BASH_VERSION**（实测 3.2.57）。只查 BASH_VERSION 的话，最该拦的那个
+        调用方式恰好被放行——这正是「把我想到的情况当成全部情况」。
+
+        探针用一个非法参数：它 4 毫秒返回、不打网络也不抢发布锁，而参数解析在
+        闸**之后**（脚本第 214 行 vs 第 30 行）。于是 rc 正好把两者分开——
+        拿到 2 说明闸先响了，拿到 1 说明闸被绕过去、参数解析先跑了。
+        """
+        import subprocess as sp
+        script = str(ROOT / "deploy" / "release.sh")
+        for shell in ("sh", "zsh"):
+            with self.subTest(shell):
+                proc = sp.run([shell, script, "--no-such-flag"],
+                              capture_output=True, text=True, cwd=str(ROOT), timeout=60)
+                both = proc.stdout + proc.stderr
+                self.assertEqual(proc.returncode, 2,
+                                 f"{shell} 应被闸拦下（rc=1 说明闸没先跑）: {both[:200]}")
+                self.assertNotIn("[1/7]", both, "拒绝时不该已经开始动 NAS")
+                self.assertNotIn("未知参数", both, "参数解析不该跑在闸前面")
+
+    def test_release_guard_does_not_refuse_real_bash(self):
+        """闸的另一侧：别关过头。拦住 bash 的话，发布路径本身就没了。
+
+        同一个非法参数探针：真 bash 应当**穿过闸**、走到参数解析才失败（rc=1）。
+        """
+        import subprocess as sp
+        proc = sp.run(["bash", str(ROOT / "deploy" / "release.sh"), "--no-such-flag"],
+                      capture_output=True, text=True, cwd=str(ROOT), timeout=60)
+        both = proc.stdout + proc.stderr
+        for shouted in ("必须用 bash 跑", "别用 sh 跑"):
+            self.assertNotIn(shouted, both)
+        self.assertEqual(proc.returncode, 1, both[:200])
+        self.assertIn("未知参数", both)
+
     def test_no_local_copy_of_the_trunk_judgement(self):
         """判据只留一处（准则 3/4）。本地再长出一份，收拢就悄悄自我撤销了。
 

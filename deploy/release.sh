@@ -23,6 +23,32 @@
 #   deploy/release.sh rollback <sha>     # 回滚到盘上已有的某个镜像标签
 set -euo pipefail
 
+# 必须是真 bash，且不能在 POSIX 模式下。
+#
+# 2026-09-21 实测代价：`sh deploy/release.sh` 跑到第 5 步报 line 302 syntax error
+# —— `done < <(...)` 是 bash 的进程替换，POSIX 模式不认。而 bash 是**边解析边执行**
+# 的，所以前四步照常跑完了：备份做了、archive 落地了，然后死在复核之前，镜像标签
+# 还没换。生产停在「文件是新 commit、跑着的是旧镜像」的半发布态，而且没有任何一步
+# 说过它失败了之外的话。
+#
+# 错的是调用方式不是脚本，但让一个多打出来的词把生产推进半发布态，就是脚本的事。
+#
+# **两个条件都要查。** macOS 的 sh 就是 bash 的 POSIX 模式，它照样设 BASH_VERSION
+# （实测 3.2.57）—— 只查 BASH_VERSION 的话，最需要拦的那个调用方式恰好会被放行。
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "❌ 必须用 bash 跑：bash deploy/release.sh  （当前不是 bash）" >&2
+  exit 2
+fi
+case "${SHELLOPTS:-}" in
+  *posix*)
+    echo "❌ 别用 sh 跑：sh 是 bash 的 POSIX 模式，认不得第 5 步的进程替换，" >&2
+    echo "   而它会在备份和落地**之后**才炸，把生产留在半发布态。" >&2
+    echo "   改用：bash deploy/release.sh" >&2
+    exit 2
+    ;;
+esac
+
+
 NAS="${PORTAL_NAS_SSH:-commiao@100.123.208.32}"
 SRC="${PORTAL_NAS_SRC:-/volume1/docker/report-portal-src}"
 DK="${PORTAL_DOCKER:-sudo -n /var/packages/ContainerManager/target/usr/bin/docker}"
