@@ -82,8 +82,8 @@ class ReleasePathTests(unittest.TestCase):
         所以「报什么漂移」和「该删什么」**刻意不是同一个集合**：报告要看见全部
         生产独有文件（准则 4），删除只能碰 git 曾经跟踪、后来删掉的那些。
         """
-        # 删这一步不能拿全量 extras
-        prune_block = RELEASE.split("[5.5]", 1)[1].split("[6/7]", 1)[0]
+        # prune 已抽成 prune_extras()（发布与回滚共用一份），断言钉函数体
+        prune_block = RELEASE.split("prune_extras() {", 1)[1].split("\n}", 1)[0]
         self.assertIn("--list-prunable", prune_block)
         self.assertNotIn("--list-extra", prune_block)
         # 而收窄的判据必须真的基于 git 历史，不是又一份手写排除清单
@@ -105,16 +105,15 @@ class ReleasePathTests(unittest.TestCase):
         `if false` 之后，`EXTRA_RC` 和那句提示都还原样留在文件里，只查字符串
         在不在的写法当场放行了它。
         """
-        self.assertIn('EXTRA_RC=$?', RELEASE)                  # 真取了退出码
+        prune_fn = RELEASE.split("prune_extras() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("rc=$?", prune_fn)                       # 真取了退出码
         # 判据必须是「非 0」，不能是「等于某个预料中的码」。第一版写成 `= "2"`，
         # 只堵住了检测自己主动 return 2 的那种失败；检查器崩掉（未捕获异常）给的
         # 是 rc=1，$EXTRA 同样为空，于是直接落进「没有多余文件」——正是本用例要
         # 防的那句话。实测 python 未捕获异常退出码就是 1。
-        self.assertIn('[ "$EXTRA_RC" != "0" ]', RELEASE)
+        self.assertIn('[ "$rc" != "0" ]', prune_fn)
         # 而且这个判断必须排在「没有多余文件」那句之前，否则查不了会先被归成「干净」
-        guard = RELEASE.index('[ "$EXTRA_RC" != "0" ]')
-        empty = RELEASE.index("没有多余文件")
-        self.assertLess(guard, empty)
+        self.assertLess(prune_fn.index('[ "$rc" != "0" ]'), prune_fn.index("没有多余文件"))
 
     def test_releases_are_serialised(self):
         """两个发布交错会互相删文件——第 5.5 步现在会**删**东西，而这个仓有明确的
@@ -126,8 +125,19 @@ class ReleasePathTests(unittest.TestCase):
         self.assertEqual(RELEASE.count("acquire_lock\n") + RELEASE.count("acquire_lock  "), 2)
 
     def test_the_lock_is_taken_before_anything_on_the_nas_changes(self):
-        """锁要是排在备份/落地之后，加它就没意义了。"""
-        self.assertLess(RELEASE.index("acquire_lock\nPREV="), RELEASE.index("tar czf"))
+        """锁要是排在备份/落地之后，加它就没意义了。
+
+        两条路径各自判：回滚现在也取锁、也备份，用「文件里第一次出现」定位会串味。
+        锚点只用代码，不用注释——RELEASE 是滤掉注释行的，拿 `# ---- 2. 取锁` 当
+        锚点会直接 ValueError（第一版就是这么写的）。
+        """
+        # 发布路径：取锁 → 备份
+        self.assertLess(RELEASE.index("acquire_lock\nPREV="),
+                        RELEASE.index("report-portal-src.backup-"))
+        # 回滚路径：取锁 → 备份（现在它也会删文件，所以也必须先备份）
+        rb = RELEASE.split('if [ "$MODE" = "rollback" ]; then', 1)[1]
+        self.assertLess(rb.index("acquire_lock"),
+                        rb.index("report-portal-src.rollback-"))
 
     def test_only_releases_a_lock_it_actually_took(self):
         """抢占失败时若照样 rm，等于把**别人正在用的**锁删掉——比没有锁更糟。"""
@@ -137,6 +147,38 @@ class ReleasePathTests(unittest.TestCase):
     def test_a_stale_lock_can_be_taken_over(self):
         """一次崩溃就把发布路径永久堵死，比并发更糟。"""
         self.assertIn("-mmin +40", RELEASE)
+
+    def test_rollback_backs_up_before_it_deletes(self):
+        """回滚现在会删文件（清掉被撤销那次发布新增的），所以它也必须先整树备份
+        ——准则 5 的「覆盖」现在含删除。原来回滚根本没有备份这一步。"""
+        rb = RELEASE.split('if [ "$MODE" = "rollback" ]; then', 1)[1]
+        self.assertIn("report-portal-src.rollback-", rb)
+        self.assertLess(rb.index("tar czf"), rb.index("prune_extras"))
+        # 备份失败就不许继续动源码树
+        self.assertIn("备份失败，不继续动源码树", rb)
+
+    def test_rollback_records_what_it_is_undoing_before_overwriting_env(self):
+        """清残留要靠「被撤销的是哪一次」，而那个值就存在马上要被覆盖的 .env 里。
+        顺序错了就永远读不到，清理只能退化成不清。"""
+        rb = RELEASE.split('if [ "$MODE" = "rollback" ]; then', 1)[1]
+        self.assertLess(rb.index("UNDOING=$("), rb.index("PORTAL_IMAGE_TAG=%s"))
+
+    def test_rollback_widens_recoverability_to_one_named_ref_not_all(self):
+        """回滚多认一条线是**收窄**不是放宽：只认调用方明确指出的那个 ref
+        （被撤销的那次发布），绝不是 `--all`——后者会把任何分支都算成可删。"""
+        rb = RELEASE.split('if [ "$MODE" = "rollback" ]; then', 1)[1]
+        self.assertIn('prune_extras "$ROLLBACK_SHA" "$UNDOING"', rb)
+        self.assertNotIn("--all", RELEASE)
+        # 读不到被撤销的标签时降级成「只按回滚目标报」，而不是乱删
+        self.assertIn('prune_extras "$ROLLBACK_SHA"\n', rb)
+
+    def test_prune_logic_exists_once(self):
+        """发布和回滚共用一份 prune。抄两遍的话判据改一次要改两处——而这套东西的
+        全部价值就在判据上（T-0099 抱怨的正是「共享逻辑抄了四遍」）。"""
+        self.assertEqual(RELEASE.count("prune_extras() {"), 1)
+        self.assertEqual(RELEASE.count("--list-prunable"), 1)   # 只在函数里出现一次
+        self.assertEqual(RELEASE.count("rm -f --"), 1)
+
 
     def test_has_a_rollback_path(self):
         """准则 6/7：带着没有退路的发布切生产，就是 kg-hub「切了之后回不来」那种
@@ -264,6 +306,54 @@ class PruneContentGateTests(unittest.TestCase):
         # ……而且要说清它为什么被跳过，措辞不能写成「有人改了生产」
         self.assertIn("不在 main 这条线上", err.getvalue())
 
+    def test_recoverable_from_widens_to_exactly_one_extra_line(self):
+        """真跑：side 分支上的内容，只有在把 side 显式指为 --recoverable-from 时
+        才算可取回；不给时不算，给 --all 那种放宽更是绝不允许。"""
+        mod = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            sha = self._temp_repo(tmp)          # main: A→C, side: B
+            old = mod.REPO
+            try:
+                mod.REPO = pathlib.Path(tmp)
+                self.assertNotIn(sha["B"], mod.historical_hashes("f.txt", "main"))
+                self.assertIn(sha["B"], mod.historical_hashes("f.txt", "side"))
+            finally:
+                mod.REPO = old
+
+
+    def test_list_prunable_actually_honours_recoverable_from(self):
+        """真跑调用点，不只验函数——变异「让 recoverable() 无视 --recoverable-from」
+        时，只验 historical_hashes 的用例全绿（回滚残留永远清不掉却没人发现）。
+        这正是本项目记过的那条：函数正确 ≠ 有人在用它、且用对了。"""
+        from unittest import mock
+        mod = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            sha = self._temp_repo(tmp)          # main: A→C；side: B
+            old = mod.REPO
+            try:
+                mod.REPO = pathlib.Path(tmp)
+                # NAS 上躺着一份只存在于 side 的内容，基准是 main
+                patches = (mock.patch.object(mod, "git_side", lambda ref: {}),
+                           mock.patch.object(mod, "nas_side", lambda: {"f.txt": sha["B"]}))
+
+                def run_with(argv):
+                    with patches[0], patches[1], \
+                         mock.patch.object(sys, "argv", argv), \
+                         mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+                         mock.patch("sys.stderr", new_callable=io.StringIO):
+                        mod.main()
+                        return out.getvalue().strip()
+
+                # 不给额外的线：不可删（它不在 main 的祖先链上）
+                self.assertEqual(run_with(["x", "--list-prunable", "--ref", "main"]), "")
+                # 显式指出「被撤销的那次」= side：这才算可取回，应进清单
+                self.assertEqual(
+                    run_with(["x", "--list-prunable", "--ref", "main",
+                              "--recoverable-from", "side"]), "f.txt")
+            finally:
+                mod.REPO = old
+
+
     def test_the_gate_compares_content_not_just_the_path(self):
         """判据必须是内容是否可在历史中找到，不能退回成「这条路径曾被跟踪」。
 
@@ -275,10 +365,13 @@ class PruneContentGateTests(unittest.TestCase):
         """
         drift_src = (ROOT / "deploy" / "check_source_drift.py").read_text(encoding="utf-8")
         block = drift_src.split("if args.list_prunable:", 1)[1].split("if args.json:", 1)[0]
+        # 放行走 recoverable() 这层间接，所以要连它的定义一起看
+        helper = block.split("def recoverable", 1)[1].split("for p in only_nas:", 1)[0]
+        self.assertIn("historical_hashes", helper)    # 放行看的是内容能否在祖先链里找到
+        self.assertNotIn("was_ever_tracked", helper)  # 「曾被跟踪」只配解释为什么跳过
         loop = block.split("for p in only_nas:", 1)[1]
         gate = next(l.strip() for l in loop.splitlines() if l.strip().startswith("if "))
-        self.assertIn("historical_hashes", gate)      # 放行看的是内容能否在历史里找到
-        self.assertNotIn("was_ever_tracked", gate)    # 「曾被跟踪」只配解释为什么跳过
+        self.assertIn("recoverable(", gate)
 
 
 class DriftStatusContractTests(unittest.TestCase):

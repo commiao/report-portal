@@ -205,7 +205,10 @@ def main() -> int:
     ap.add_argument("--list-extra", action="store_true",
                     help="列出全部「只在 NAS 上存在」的文件（每行一个），报告用")
     ap.add_argument("--list-prunable", action="store_true",
-                    help="列出其中**git 曾经跟踪、后来删掉**的那些——只有这批可以自动删")
+                    help="列出其中**内容能在 --ref 祖先链里找到**的那些——只有这批可以自动删")
+    ap.add_argument("--recoverable-from", default=None, metavar="REF",
+                    help="再多认一条祖先链当作「可取回」。**只给回滚用**："
+                         "被撤销那次发布新增的文件，正是从这条线上来的")
     args = ap.parse_args()
 
     # 基准是**线上实际跑的那个 commit**，不是主干 tip。
@@ -278,8 +281,18 @@ def main() -> int:
         # 只查「曾被跟踪」还不够（kg-hub-edit 会话指出的洞）：被跟踪过 ≠ NAS 上
         # 那份还等于历史里某一版。生产上手改过、git 又删了的文件只满足前者，删了
         # 那些改动就真没了。所以比的是内容指纹，不是路径是否出现过。
+        # 回滚时多认一条线：**被撤销的那次发布**的祖先链。
+        # 这是收窄不是放宽——`--all` 会把任何分支都算进来，而这里只认一个由调用方
+        # 明确指出的 ref。理由是回滚是我们自己发起的已知动作：那些残留正是被撤销
+        # 那次发布放上去的，定义上可从它那条线取回。不给这个参数时行为完全不变。
+        def recoverable(path: str) -> bool:
+            if got[path] in historical_hashes(path, ref):
+                return True
+            return bool(args.recoverable_from) and \
+                got[path] in historical_hashes(path, args.recoverable_from)
+
         for p in only_nas:
-            if got[p] in historical_hashes(p, ref):
+            if recoverable(p):
                 print(p)
             elif got[p] in historical_hashes(p, None):
                 # 内容真实存在，只是不在这条发布线上：多半是部署不完整，或有人

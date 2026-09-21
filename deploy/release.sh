@@ -73,6 +73,55 @@ release_lock() {
 }
 trap release_lock EXIT
 
+# ---- prune：清掉 NAS 上多余、且内容可从 git 取回的文件 ----------------------
+# 发布和回滚共用这一份。抄两遍的话，判据改一次要改两处——而这套东西的全部价值
+# 就在判据上（T-0099 抱怨的正是「共享逻辑抄了四遍」）。
+#
+# 用法：prune_extras <基准ref> [额外可取回的ref]
+# 判据是 `--list-prunable`：内容能在基准 ref 的祖先链里找到。回滚时多给一个
+# 「被撤销那次发布」的 ref —— 那些残留正是它放上去的，定义上可从那条线取回。
+# 不是放宽成 --all：`--all` 会把任何分支都算进来，这里只认调用方明确指出的一条。
+prune_extras() {
+  local ref="$1" extra_ref="${2:-}"
+  local argv=(--ref "$ref" --list-prunable)
+  [ -n "$extra_ref" ] && argv+=(--recoverable-from "$extra_ref")
+
+  set +e
+  local extra rc
+  extra=$(python3 "$REPO/deploy/check_source_drift.py" "${argv[@]}" 2>/dev/null)
+  rc=$?
+  set -e
+
+  # 「没有多余文件」和「这次没查成」必须分开报；判据是**非 0**而不是「等于某个
+  # 预料中的码」——检查器崩掉给的是 rc=1，输出同样为空，会直接落进「没有多余
+  # 文件」，把崩溃播报成清理干净。失败方向永远是「不删」。
+  if [ "$rc" != "0" ]; then
+    say "      ⚠️ 拿不到清单（检测退出 $rc），本次不删任何东西"
+    say "         宁可留着让漂移检测继续报，也不在没查清时删生产上的文件"
+    return 0
+  fi
+  if [ -z "$extra" ]; then
+    say "      没有多余文件"
+    return 0
+  fi
+  local pruned=0 path
+  while read -r path; do
+    [ -n "$path" ] || continue
+    # 路径校验：只在 $SRC 里删，绝不让 .. 或绝对路径跑出去（清单是外部命令输出）。
+    case "$path" in
+      /*|*..*) say "      拒绝删除可疑路径：$path"; continue ;;
+    esac
+    say "      删除：$path"
+    on_nas "rm -f -- '$SRC/$path'"
+    pruned=$((pruned + 1))
+  done <<EOF
+$extra
+EOF
+  on_nas "find '$SRC' -mindepth 1 -type d -empty -delete 2>/dev/null || true"
+  say "      共清理 $pruned 个"
+}
+
+
 REF="origin/main"
 DRY=0
 MODE="release"
@@ -91,10 +140,15 @@ done
 # ---- 回滚：只切标签，不重建（镜像必须已在盘上）-----------------------------
 if [ "$MODE" = "rollback" ]; then
   [ -n "$ROLLBACK_SHA" ] || die "rollback 需要一个镜像标签（sha）"
-  acquire_lock   # 回滚也写 .env、也重启容器，和发布互斥
+  acquire_lock   # 回滚也写 .env、也重启容器、现在还会删文件，和发布互斥
   on_nas "$DK image inspect $IMAGE:$ROLLBACK_SHA >/dev/null 2>&1" \
     || die "NAS 上没有镜像 $IMAGE:$ROLLBACK_SHA，无法回滚到它"
-  say "回滚到 $IMAGE:$ROLLBACK_SHA"
+
+  # 先记下**被撤销的是哪一次**，再覆盖 .env。下面清理残留要靠它：那些多出来的
+  # 文件正是这次发布放上去的，可从它的祖先链取回。读不到就不清，只报。
+  UNDOING=$(on_nas "grep '^PORTAL_IMAGE_TAG=' $SRC/.env 2>/dev/null | cut -d= -f2-" || true)
+
+  say "回滚到 $IMAGE:$ROLLBACK_SHA（撤销 ${UNDOING:-<读不到上一个标签>}）"
   on_nas "cd $SRC && printf 'PORTAL_IMAGE_TAG=%s\n' '$ROLLBACK_SHA' > .env && \
           $DK compose -p $PROJECT up -d --no-build $SERVICE >/dev/null 2>&1 && echo ok"
   sleep 3
@@ -102,25 +156,36 @@ if [ "$MODE" = "rollback" ]; then
   say "health=$code"
   [ "$code" = "200" ] || die "回滚后健康检查未通过"
 
-  # 源码树也要跟着回去。漂移检测现在以线上标记为基准（T-0101），只切标签不动源码
-  # 的话，.env 说的是 A、目录里躺的是 B，检测当场报红——而那条红是我们自己造的。
-  # 顺序：先恢复服务、再同步源码。镜像不可变，源码内容不影响正在跑的容器，所以
-  # 服务优先；源码没同步上只是「待修」，不该拖着服务不恢复。
-  if git -C "$REPO" cat-file -e "${ROLLBACK_SHA}^{commit}" 2>/dev/null; then
-    if git -C "$REPO" archive --format=tar "$ROLLBACK_SHA" \
-         | ssh "${SSH_OPTS[@]}" "$NAS" "tar xf - -C '$SRC'"; then
-      say "源码树已同步回 $ROLLBACK_SHA"
-      # archive 只覆盖不删除：被回滚掉的那次发布**新增**的文件会留下。不在这里删
-      # ——它们不在 $ROLLBACK_SHA 的祖先链上，按 prune 的判据本就不该自动删；
-      # 报出来让人看一眼，比在故障处置中途做删除动作稳妥。
-      left=$(python3 "$REPO/deploy/check_source_drift.py" --ref "$ROLLBACK_SHA" --list-extra 2>/dev/null || true)
-      [ -z "$left" ] || { say "      注意：被回滚那次发布新增的文件仍在 NAS 上（漂移检测会报）："
-                          printf '%s\n' "$left" | sed 's/^/        /'; }
-    else
-      say "⚠️ 服务已回滚，但源码树没同步回去——漂移检测会报红，需手工处理"
-    fi
-  else
+  # 服务已恢复，再让源码树跟着回去。顺序刻意如此：镜像不可变，源码内容不影响
+  # 正在跑的容器，所以服务优先；源码没同步上只是「待修」，不该拖着服务不恢复。
+  if ! git -C "$REPO" cat-file -e "${ROLLBACK_SHA}^{commit}" 2>/dev/null; then
     say "⚠️ 本地没有 commit $ROLLBACK_SHA，源码树未同步（服务已回滚）"
+    exit 0
+  fi
+
+  # 马上要删东西了，先备份整树（准则 5：备份 ⊇ 覆盖，而「覆盖」现在含删除）。
+  STAMP=$(date +%Y%m%d-%H%M%S)
+  BACKUP="$SRC/../report-portal-src.rollback-$STAMP.tgz"
+  say "备份 $SRC → $BACKUP"
+  on_nas "tar czf '$BACKUP' -C '$SRC' ." || die "备份失败，不继续动源码树"
+
+  if git -C "$REPO" archive --format=tar "$ROLLBACK_SHA" \
+       | ssh "${SSH_OPTS[@]}" "$NAS" "tar xf - -C '$SRC'"; then
+    say "源码树已同步回 $ROLLBACK_SHA"
+  else
+    say "⚠️ 服务已回滚，但源码树没同步回去——漂移检测会报红，需手工处理"
+    exit 0
+  fi
+
+  # archive 只覆盖不删除，所以被撤销那次发布**新增**的文件还留着。清掉它们——
+  # 判据不是「不在回滚目标里就删」，而是「内容能从回滚目标 or 被撤销那次发布的
+  # 祖先链取回」。生产独有、或来自第三条线的东西照样不碰，只会被报出来。
+  say "清理被撤销那次发布新增的文件"
+  if [ -n "$UNDOING" ]; then
+    prune_extras "$ROLLBACK_SHA" "$UNDOING"
+  else
+    say "      读不到被撤销的标签，本次不清理（只按回滚目标报）"
+    prune_extras "$ROLLBACK_SHA"
   fi
   exit 0
 fi
@@ -197,41 +262,7 @@ say "      $checked 个文件全部一致"
 # 这两类都不删，但仍会被漂移检测报出来，交给人判断。
 # 删除已被第 3 步的整树备份覆盖（准则 5：备份 ⊇ 覆盖，现在「覆盖」含删除）。
 say "[5.5] 清理 git 已删除的文件（只删内容可在本次 ref 祖先链中找到的）"
-set +e
-EXTRA=$(python3 "$REPO/deploy/check_source_drift.py" --ref "$SHA" --list-prunable 2>/dev/null)
-EXTRA_RC=$?
-set -e
-# 「没有多余文件」和「这次没查成」必须分开报。混成一句的话，取数一挂就会播报
-# 成「清理干净」——同一个病本次已经在 health 和巡检上各修过一遍了。
-#
-# 判据是「非 0」而不是「等于 2」。第一版写的是 `= 2`，只堵住了**预料到**的那种
-# 失败（检测自己判定拿不到指纹时主动 return 2）；而检查器崩掉（未捕获异常）给的
-# 是 rc=1，$EXTRA 同样为空，于是直接落进下面那句「没有多余文件」——正好就是上面
-# 三行注释警告的事。kg-hub-edit 会话复核时指出的。
-# 这一段的失败方向必须永远是「不删」，所以凡不是明确的成功都按没查成处理。
-if [ "$EXTRA_RC" != "0" ]; then
-  say "      ⚠️ 拿不到清单（检测退出 $EXTRA_RC），本次不删任何东西"
-  say "         宁可留着让漂移检测继续报，也不在没查清时删生产上的文件"
-elif [ -z "$EXTRA" ]; then
-  say "      没有多余文件"
-else
-  pruned=0
-  while read -r path; do
-    [ -n "$path" ] || continue
-    # 路径校验：只在 $SRC 里删，绝不让 .. 或绝对路径跑出去。
-    case "$path" in
-      /*|*..*) say "      拒绝删除可疑路径：$path"; continue ;;
-    esac
-    say "      删除：$path"
-    on_nas "rm -f -- '$SRC/$path'"
-    pruned=$((pruned + 1))
-  done <<EOF
-$EXTRA
-EOF
-  # 文件删完可能留下空目录；清掉它们，但绝不碰 \$SRC 本身。
-  on_nas "find '$SRC' -mindepth 1 -type d -empty -delete 2>/dev/null || true"
-  say "      共清理 $pruned 个"
-fi
+prune_extras "$SHA"
 
 # ---- 6. 构建不可变镜像 + 切标签起容器 --------------------------------------
 say "[6/7] 构建 $IMAGE:$SHORT 并启动（不动 latest）"
