@@ -48,6 +48,11 @@ REPO = Path(__file__).resolve().parents[1]
 # 留下，且只在产物缺失时发作。拿不到就报「查不了」——见下面调用点。
 FLEET_LIB = Path(os.environ.get(
     "FLEET_OPS_LIB", Path.home() / ".local/share/fleet-ops/current/lib"))
+# 别把 __pycache__ 写进人家的发布产物目录：fleet-ops 的 releases/<sha>/ 契约是
+# **内容不可变**（原子切换就是靠这一点成立的）。2026-09-21 实测：接上之后第一次
+# 跑就在 current/lib/ 下留了个 __pycache__，于是那份产物不再逐字等于它的 commit
+# ——而这个脚本自己就是来抓这种事的。
+sys.dont_write_bytecode = True
 if str(FLEET_LIB) not in sys.path:
     sys.path.insert(0, str(FLEET_LIB))
 try:

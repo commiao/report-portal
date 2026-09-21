@@ -513,6 +513,31 @@ class DeployedCommitBaselineTests(unittest.TestCase):
         # 取数适配器读的必须是 release.sh 自己写的那个标记
         self.assertIn("PORTAL_IMAGE_TAG", src)
 
+    def test_does_not_write_bytecode_into_fleet_ops_release_dir(self):
+        """别把 __pycache__ 写进人家的发布产物目录。
+
+        fleet-ops 的 releases/<sha>/ 契约是**内容不可变**——原子切换就是靠这一点
+        成立的。2026-09-21 实测：接上之后第一次跑就在 current/lib/ 下留了个
+        __pycache__，那份产物于是不再逐字等于它的 commit。**而这个脚本自己就是
+        来抓这种事的。**
+
+        真跑，不读源码：造一个假的 fleet-ops lib 目录指过去，跑完看它干净不干净。
+        """
+        import shutil, subprocess as sp
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = pathlib.Path(tmp) / "lib"
+            lib.mkdir()
+            real = pathlib.Path.home() / ".local/share/fleet-ops/current/lib/fleetops_drift.py"
+            if not real.exists():
+                self.skipTest("本机没有 fleet-ops 产物")
+            shutil.copy(real, lib / "fleetops_drift.py")
+            sp.run([sys.executable, str(ROOT / "deploy" / "check_source_drift.py"),
+                    "--ref", "HEAD", "--list-prunable"],
+                   capture_output=True, text=True, cwd=str(ROOT), timeout=60,
+                   env=dict(os.environ, FLEET_OPS_LIB=str(lib)))
+            self.assertEqual(sorted(p.name for p in lib.iterdir()),
+                             ["fleetops_drift.py"], "产物目录被写脏了")
+
     def test_probe_updates_its_checkout_before_running(self):
         """探针必须先把工作树切到主干，再跑检查器。
 
