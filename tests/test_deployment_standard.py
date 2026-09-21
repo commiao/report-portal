@@ -133,7 +133,7 @@ class ReleasePathTests(unittest.TestCase):
         """
         # 发布路径：取锁 → 备份
         self.assertLess(RELEASE.index("acquire_lock\nPREV="),
-                        RELEASE.index("report-portal-src.backup-"))
+                        RELEASE.index('BACKUP="$SRC/../report-portal-src.backup-'))
         # 回滚路径：取锁 → 备份（现在它也会删文件，所以也必须先备份）
         rb = RELEASE.split('if [ "$MODE" = "rollback" ]; then', 1)[1]
         self.assertLess(rb.index("acquire_lock"),
@@ -177,7 +177,10 @@ class ReleasePathTests(unittest.TestCase):
         全部价值就在判据上（T-0099 抱怨的正是「共享逻辑抄了四遍」）。"""
         self.assertEqual(RELEASE.count("prune_extras() {"), 1)
         self.assertEqual(RELEASE.count("--list-prunable"), 1)   # 只在函数里出现一次
-        self.assertEqual(RELEASE.count("rm -f --"), 1)
+        # 删除动作各自只在自己的函数里出现一次（备份保留是另一个删除器，别混着数）
+        for fn_name in ("prune_extras() {", "prune_backups() {"):
+            body = RELEASE.split(fn_name, 1)[1].split("\n}", 1)[0]
+            self.assertEqual(body.count("rm -f --"), 1, fn_name)
 
 
     def test_has_a_rollback_path(self):
@@ -430,6 +433,59 @@ class DriftDetectionTests(unittest.TestCase):
         """取数失败必须和「一致」区分开，否则 ssh 挂掉会被读成体检通过。"""
         self.assertIn("取数失败，不作判决", DRIFT)
         self.assertIn("return 2", DRIFT)
+
+
+class BackupRetentionTests(unittest.TestCase):
+    """备份是准则 5 要的，保留策略是它的配套——没有的话它无界增长，
+    而且**没人会发现它在涨**（实测一天 20 个）。"""
+
+    def _fn(self):
+        return RELEASE.split("prune_backups() {", 1)[1].split("\n}", 1)[0]
+
+    def test_retention_is_by_count_not_age(self):
+        """发布是突发式的（几小时内 20 次）。按天龄要么一次清光、要么什么都不清；
+        按份数才保证「总能回退最近 N 次」。"""
+        fn = self._fn()
+        self.assertIn("PORTAL_BACKUP_KEEP:-10", fn)
+        self.assertIn("tail -n +$((keep + 1))", fn)
+        self.assertNotIn("-mtime", fn)
+
+    def test_it_only_ever_matches_our_own_two_filenames(self):
+        """`$SRC/..` 是共享目录：同级住着 kg-hub-src、skill-sync-gateway、
+        report-portal-legacy-backups。宽 glob 会删到别人家。"""
+        fn = self._fn()
+        self.assertIn("report-portal-src.backup-*.tgz", fn)
+        self.assertIn("report-portal-src.rollback-*.tgz", fn)
+        # 删除前还要再确认是普通文件——绝不碰目录
+        self.assertIn('[ -f "$f" ] || continue', fn)
+        self.assertIn("rm -f --", fn)
+        self.assertNotIn("rm -rf", fn)
+
+    def test_a_failed_listing_keeps_everything(self):
+        """少删一份只是多占几十 K，删错一份不可逆。所以拿不到清单时什么都不删，
+        而不是「没列出来就当没有」。"""
+        fn = self._fn()
+        self.assertIn("grep -q '^TOTAL='", fn)
+        self.assertIn("本次不清理", fn)
+        # 守卫必须排在统计/汇报之前
+        self.assertLess(fn.index("本次不清理"), fn.index("原有 $total 份"))
+
+    def test_both_paths_share_one_retention(self):
+        """发布和回滚都会造备份，都得清；抄两遍则两边各自漂。"""
+        self.assertEqual(RELEASE.count("prune_backups() {"), 1)
+        calls = [l for l in RELEASE.splitlines() if l.strip() == "prune_backups"]
+        self.assertEqual(len(calls), 2, "发布与回滚各调一次")
+
+    def test_usage_is_reported_so_growth_is_visible(self):
+        """不报占用的话，下次它再涨起来仍然没人知道——这本来就是它被漏掉的原因。"""
+        self.assertIn("当前占用", self._fn())
+
+    def test_remote_script_avoids_case_in_a_heredoc(self):
+        """macOS 自带 bash 3.2 会把 `$( )` 里 heredoc 中的 `;;` 误解析成语法错误。
+        最小复现：同一段 heredoc 去掉 case 就正常。`bash -n` 当场抓到过。"""
+        fn = self._fn()
+        self.assertNotIn(";;", fn)
+
 
 
 class DeployedCommitBaselineTests(unittest.TestCase):

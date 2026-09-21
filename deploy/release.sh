@@ -42,6 +42,61 @@ say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 on_nas() { ssh "${SSH_OPTS[@]}" "$NAS" "$@"; }
 
+# ---- 备份保留：留最近 N 份，其余删 ------------------------------------------
+# 备份本身是准则 5 要的，保留策略是它的配套——没有的话它无界增长，而且**没人会
+# 发现它在涨**（实测：一天 20 个）。
+#
+# 按**份数**保留而不是按天龄：发布是突发式的（今天几小时内 20 次），按天龄要么
+# 一次清光、要么什么都不清；按份数才保证「总能回退最近 N 次」。
+#
+# ⚠️ `$SRC/..` 是**共享目录**：同级还住着 kg-hub-src、skill-sync-gateway、
+# report-portal-legacy-backups 等。所以只认我们自己造的那两个确切文件名前缀，
+# 且只删普通文件（`-type f`）——绝不碰目录，也绝不用宽 glob。
+prune_backups() {
+  local keep="${PORTAL_BACKUP_KEEP:-10}" out rc
+  # 远端脚本走 **quoted heredoc**：本地一律不展开，参数按位置传。
+  # 上一版把整段塞进双引号 ssh 字符串，转义层层嵌套还报了警告——今天已经被
+  # 「f-string 里套转义引号」咬过两次，同一个坑不值得再踩第三次。
+  set +e
+  out=$(ssh "${SSH_OPTS[@]}" "$NAS" "bash -s -- '$SRC' '$keep'" <<'REMOTE'
+set -u
+parent=$(dirname "$1"); keep="$2"
+cd "$parent" 2>/dev/null || exit 9
+files=$(ls -1t report-portal-src.backup-*.tgz report-portal-src.rollback-*.tgz 2>/dev/null)
+printf 'TOTAL=%s\n' "$(printf '%s' "$files" | grep -c . || true)"
+printf '%s\n' "$files" | tail -n +$((keep + 1)) | grep . | while read -r f; do
+  # 再匹配一次名字并要求是普通文件：同级目录还住着别的服务和
+  # report-portal-legacy-backups/，删错代价远大于少删。
+  # 这里**刻意不用 case**：macOS 自带的 bash 3.2 会把 `$( )` 里 heredoc 中的
+  # `;;` 误解析成语法错误（最小复现：同样的 heredoc 去掉 case 就正常）。
+  [ -f "$f" ] || continue
+  keepit=0
+  [ "${f#report-portal-src.backup-}" != "$f" ] && keepit=1
+  [ "${f#report-portal-src.rollback-}" != "$f" ] && keepit=1
+  [ "${f%.tgz}" != "$f" ] || keepit=0
+  [ "$keepit" = 1 ] || continue
+  rm -f -- "$f" && printf 'DEL=%s\n' "$f"
+done
+du -ch report-portal-src.backup-*.tgz report-portal-src.rollback-*.tgz 2>/dev/null \
+  | tail -1 | awk '{print "SIZE=" $1}'
+REMOTE
+)
+  rc=$?
+  set -e
+  # 拿不到 TOTAL 标记 = 这次没列成，什么都不删。失败方向恒为「保留」——
+  # 少删一份只是多占几十 K，删错一份是不可逆的。
+  if [ "$rc" != "0" ] || ! printf '%s' "$out" | grep -q '^TOTAL='; then
+    say "   备份保留：列不出备份（退出 $rc），本次不清理"
+    return 0
+  fi
+  local total deleted size
+  total=$(printf '%s' "$out" | sed -n 's/^TOTAL=//p')
+  deleted=$(printf '%s\n' "$out" | grep -c '^DEL=' || true)
+  size=$(printf '%s' "$out" | sed -n 's/^SIZE=//p')
+  say "   备份保留：原有 $total 份，删 $deleted 份（保留最近 $keep），当前占用 ${size:-?}"
+}
+
+
 # ---- 发布锁：两个发布交错会互相删文件 --------------------------------------
 # 这个仓有明确的多 actor 撞车史（见 DEPLOY.md 开头），而第 5.5 步现在会**删**
 # 文件。两个发布交错时的形态很具体：A 刚 archive 落地、还没走完，B 的 prune 看到
@@ -187,6 +242,7 @@ if [ "$MODE" = "rollback" ]; then
     say "      读不到被撤销的标签，本次不清理（只按回滚目标报）"
     prune_extras "$ROLLBACK_SHA"
   fi
+  prune_backups
   exit 0
 fi
 
@@ -333,3 +389,4 @@ if [ -f "$CHECKER" ]; then
     *) say "   ⚠️ 漂移判决没刷成（退出 $DRIFT_RC）：$STATUS_FILE 里可能还是发布前那条，别拿它当结论" ;;
   esac
 fi
+prune_backups
