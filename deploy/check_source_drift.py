@@ -26,6 +26,7 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -33,6 +34,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+
+# 「线上那个 commit 还在不在主干这条线上」——这条判据的唯一定义在 fleet-ops
+# （准则 3/4：同一条判据只留一处）。取线上指纹的方式各服务不同，那部分是适配器、
+# 留在本文件；判据不是。
+#
+# 按**生产契约的稳定入口**寻址，不从 __file__ 推导（准则 26/27）：这里要的是
+# 「fleet-ops 产物应该在哪」，不是「本脚本恰好住在哪」。本检查器有两个跑法
+# （release.sh 从工作树跑、launchd 探针从私有克隆跑），从 __file__ 推导两边会
+# 指到不同的东西。
+#
+# **拿不到不回退到本地副本。** T-0107 刚否掉这个形态：兜底等于把 bug 以兜底之名
+# 留下，且只在产物缺失时发作。拿不到就报「查不了」——见下面调用点。
+FLEET_LIB = Path(os.environ.get(
+    "FLEET_OPS_LIB", Path.home() / ".local/share/fleet-ops/current/lib"))
+if str(FLEET_LIB) not in sys.path:
+    sys.path.insert(0, str(FLEET_LIB))
+try:
+    from fleetops_drift import trunk_verdict
+    TRUNK_UNAVAILABLE = ""
+except ImportError as exc:                       # noqa: BLE001 —— 要的就是兜住并说话
+    trunk_verdict = None
+    TRUNK_UNAVAILABLE = (
+        f"主干判据取不到：{FLEET_LIB}/fleetops_drift.py 导入失败（{exc}）——"
+        "fleet-ops 产物缺失或 current 软链断了。这不等于没漂，只是这次判不了。")
+# 刻意**不在这里抛**：--list-prunable 之类的模式根本不需要主干判决，在 import 处
+# 抛会让 fleet-ops 一缺席就连 release.sh 的 prune 一起瘫掉——把爆炸半径放大而不是
+# 关住。判空放在真正用到它的那一处。
 NAS = "commiao@100.123.208.32"
 SRC = "/volume1/docker/report-portal-src"
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
@@ -112,46 +140,6 @@ def live_commit() -> str:
     return value
 
 
-def fetch_origin() -> bool:
-    """把 origin 拉新。失败返回 False。"""
-    proc = subprocess.run(["git", "-C", str(REPO), "fetch", "origin", "--quiet"],
-                          capture_output=True, text=True)
-    return proc.returncode == 0
-
-
-def trunk_verdict(ref: str, trunk: str = "origin/main") -> tuple[str, str]:
-    """ref 在不在主干这条线上。返回 (判决, 一句人话)，判决三选一：on / off / unknown。
-
-    **用 `merge-base --is-ancestor` 而不是「等于 trunk」。** 准则 18 原话：回滚到
-    一个更早的 commit 是正当操作，只要它确实在主干这条线上。写成相等的话，
-    每一次正当回滚都会被报成漂移 —— 而回滚恰恰是最不需要一条看不懂的红灯的时刻。
-
-    **为什么拉不到 origin 不是直接判 unknown。** 陈旧的 origin/main 只会造成
-    **单向**的错：一个 commit 若是旧主干的祖先，它必然也是新主干的祖先，所以
-    `True` 在陈旧基线下依然可信；只有 `False` 可能是「其实已经合进去了，只是
-    这次没拉到」。于是拉不到时 True 照常放行，False 降级成 unknown。
-    不这么分的话，一次网络抖动就会把一条正常的绿变成 rc=2 的橙 —— 而这条链路
-    有据可查地会抖（Mac 侧实测多次），天天亮的橙灯等于没有灯（准则 28）。
-    """
-    fetched = fetch_origin()
-    short = ref[:12]
-    exists = subprocess.run(
-        ["git", "-C", str(REPO), "cat-file", "-e", f"{ref}^{{commit}}"],
-        capture_output=True).returncode == 0
-    if not exists:
-        if not fetched:
-            return "unknown", f"{short} 本地没有，且这次没拉到 origin —— 判不了"
-        return "off", f"{short} 在 origin 上根本不存在（线上跑着一个没推上来的版本）"
-    if subprocess.run(
-            ["git", "-C", str(REPO), "merge-base", "--is-ancestor", ref, trunk],
-            capture_output=True).returncode == 0:
-        return "on", f"{short} 在 {trunk} 这条线上"
-    if not fetched:
-        return "unknown", (f"{short} 看着不在主干上，但这次没拉到 origin，"
-                           "本地主干可能是陈旧的 —— 不作判决")
-    return "off", f"{short} 不在 {trunk} 这条线上"
-
-
 def git_side(ref: str) -> dict:
     """{path: sha256} for everything in that commit."""
     out = {}
@@ -227,7 +215,12 @@ def main() -> int:
     # 列举模式不出判决（它给 release.sh 提供机器可读清单），因此跳过主干判，
     # 也不写状态文件——否则一次取清单会覆盖巡检的判决。
     if not listing:
-        trunk, why = trunk_verdict(ref)
+        if trunk_verdict is None:
+            print(f"🟠 {TRUNK_UNAVAILABLE}", file=sys.stderr)
+            if args.status_file:
+                write_status(args.status_file, "error", TRUNK_UNAVAILABLE)
+            return 2
+        trunk, why = trunk_verdict(REPO, ref)
         if trunk == "unknown":
             print(f"🟠 {why}", file=sys.stderr)
             if args.status_file:

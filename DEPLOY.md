@@ -51,6 +51,18 @@ deploy/check_source_drift.py --ref <commit>  # 显式指定基准
 # 0=一致  1=有漂移  2=查不了（三者必须分开，混一起等于 ssh 一挂就播报体检通过）
 ```
 
+**「那个 commit 还在不在主干线上」这半句判据不在本仓库**，在 fleet-ops 的
+`lib/fleetops_drift.py`（T-0099 A 项收拢；本仓库和 credvault 原先各存了一份逐字
+副本）。取线上指纹的方式各服务不同，那部分是适配器、留在本仓库；判据只留一处。
+
+因此本检查器**运行期依赖 fleet-ops 产物** `~/.local/share/fleet-ops/current/lib`
+（可用 `FLEET_OPS_LIB` 覆盖，只为可测）。取不到时：
+
+- 判决落 `error`（「查不了」）+ rc=2，**不是 ok** —— 巡检会亮 🟠；
+- **不回退到本地副本**（兜底等于把 bug 以兜底之名留下，只在产物缺失时发作）；
+- `--list-extra/--list-prunable` **照常可用** —— 它们不需要主干判决，不该被连累，
+  所以判空放在用到的那一处，不在 import 处抛。
+
 **基准是线上实际跑的那个 commit，不是主干 tip。** 它从 NAS 的 `.env` 读
 `PORTAL_IMAGE_TAG`——那是 release.sh 自己写的，不是我们猜的。写成「等于 tip」
 的话，**每次发布之后到下次发布之前这条检查会一直红**（合了就红、发了才绿），
