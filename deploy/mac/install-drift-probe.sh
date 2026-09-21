@@ -20,6 +20,17 @@ REMOTE="${PORTAL_GIT_REMOTE:-git@github-commiao:commiao/report-portal.git}"
 
 say() { printf '%s\n' "$*"; }
 
+# launchd 重载的公共实现由 fleet-ops 产物提供（准则 32：机制不能依赖被安装方
+# 自己提供）。**库不在就直接失败**，不回退到手写 bootout+bootstrap。
+LAUNCHD_LIB="${FLEET_OPS_LAUNCHD_LIB:-$HOME/.local/share/fleet-ops/current/platform/darwin/launchd.sh}"
+if [ ! -f "$LAUNCHD_LIB" ]; then
+  echo "缺少 fleet-ops 的 launchd 库：$LAUNCHD_LIB" >&2
+  echo "  先装 fleet-ops： sh ~/workspace_claudeCode/fleet-ops/platform/darwin/install.sh" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+. "$LAUNCHD_LIB"
+
 say "[1/3] 私有 clone：$CLONE"
 if [ -d "$CLONE/.git" ]; then
   git -C "$CLONE" fetch origin --quiet
@@ -36,10 +47,13 @@ git -C "$CLONE" checkout --quiet --detach origin/main
 say "[2/3] 渲染并装载 $LABEL"
 mkdir -p "$(dirname "$PLIST_DST")" "$(dirname "$STATUS")" "$HOME/Library/Logs"
 sed "s|__HOME__|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
-# 用 Label 卸载，不要用文件名推（准则 27：按文件名 bootout 一个不存在的 job 会
-# 静默成功，旧定义一直没卸掉）。
-launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
+# 重载走 fleet-ops 的公共实现。这里原本已经做对了一半 —— 用 Label 不用文件名
+# （准则 27）—— 但漏了另一半：**`bootout` 返回不等于作业已退干净**，紧跟着
+# bootstrap 会失败且不重试，结果是旧的已卸、新的没装（准则 29 的推论，
+# fleet-ops T-0142：批量切 4 个作业时四个全灭，停了约两分钟）。
+# 记住一条准则不等于记住相邻的那条，所以两半都收进 launchd_reload：
+# 它自己从 plist 内容读 Label，也自己等旧作业退干净。
+launchd_reload "$PLIST_DST"
 say "      已装载（RunAtLoad，稍后会写第一份判决）"
 
 say "[3/3] 立刻跑一次，确认判决写得出来"
