@@ -101,6 +101,27 @@ if [ "$MODE" = "rollback" ]; then
   code=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "$HEALTH_URL" || true)
   say "health=$code"
   [ "$code" = "200" ] || die "回滚后健康检查未通过"
+
+  # 源码树也要跟着回去。漂移检测现在以线上标记为基准（T-0101），只切标签不动源码
+  # 的话，.env 说的是 A、目录里躺的是 B，检测当场报红——而那条红是我们自己造的。
+  # 顺序：先恢复服务、再同步源码。镜像不可变，源码内容不影响正在跑的容器，所以
+  # 服务优先；源码没同步上只是「待修」，不该拖着服务不恢复。
+  if git -C "$REPO" cat-file -e "${ROLLBACK_SHA}^{commit}" 2>/dev/null; then
+    if git -C "$REPO" archive --format=tar "$ROLLBACK_SHA" \
+         | ssh "${SSH_OPTS[@]}" "$NAS" "tar xf - -C '$SRC'"; then
+      say "源码树已同步回 $ROLLBACK_SHA"
+      # archive 只覆盖不删除：被回滚掉的那次发布**新增**的文件会留下。不在这里删
+      # ——它们不在 $ROLLBACK_SHA 的祖先链上，按 prune 的判据本就不该自动删；
+      # 报出来让人看一眼，比在故障处置中途做删除动作稳妥。
+      left=$(python3 "$REPO/deploy/check_source_drift.py" --ref "$ROLLBACK_SHA" --list-extra 2>/dev/null || true)
+      [ -z "$left" ] || { say "      注意：被回滚那次发布新增的文件仍在 NAS 上（漂移检测会报）："
+                          printf '%s\n' "$left" | sed 's/^/        /'; }
+    else
+      say "⚠️ 服务已回滚，但源码树没同步回去——漂移检测会报红，需手工处理"
+    fi
+  else
+    say "⚠️ 本地没有 commit $ROLLBACK_SHA，源码树未同步（服务已回滚）"
+  fi
   exit 0
 fi
 

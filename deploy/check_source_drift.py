@@ -26,11 +26,13 @@
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parents[1]
 NAS = "commiao@100.123.208.32"
 SRC = "/volume1/docker/report-portal-src"
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
@@ -55,7 +57,7 @@ def run(cmd, **kw):
 
 def was_ever_tracked(path: str) -> bool:
     """这条路径在 git 历史里出现过吗？（只用来把跳过的原因说清楚）"""
-    out = subprocess.run(["git", "log", "--all", "--oneline", "-1", "--", path],
+    out = subprocess.run(["git", "-C", str(REPO), "log", "--all", "--oneline", "-1", "--", path],
                          capture_output=True, text=True)
     return out.returncode == 0 and bool(out.stdout.strip())
 
@@ -81,25 +83,82 @@ def historical_hashes(path: str, ref: str = None) -> set:
     所以它是一条规则，不是两条。
     """
     scope = ["--all"] if ref is None else [ref]
-    out = subprocess.run(["git", "log", *scope, "--format=%H", "--", path],
+    out = subprocess.run(["git", "-C", str(REPO), "log", *scope, "--format=%H", "--", path],
                          capture_output=True, text=True)
     if out.returncode != 0:
         return set()
     shas = set()
     for commit in out.stdout.split():
-        blob = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True)
+        blob = subprocess.run(["git", "-C", str(REPO), "show", f"{commit}:{path}"], capture_output=True)
         if blob.returncode == 0:
             shas.add(hashlib.sha256(blob.stdout).hexdigest())
     return shas
 
 
+def live_commit() -> str:
+    """线上正在跑的那个 commit。取自 release.sh 自己写的 .env，不是我们猜的。
+
+    取数方式是各服务特有的（本服务用 PORTAL_IMAGE_TAG），判定策略是共享的——
+    T-0099 要把策略收进 fleet-ops，所以下面的 trunk_verdict 逐字照抄 kg-hub，
+    只有这个适配器允许不同。
+    """
+    proc = subprocess.run(
+        SSH + [NAS, f"grep '^PORTAL_IMAGE_TAG=' '{SRC}/.env' 2>/dev/null | head -1 | cut -d= -f2-"],
+        capture_output=True, text=True)
+    value = proc.stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{7,40}", value):
+        raise SystemExit(
+            f"读不到线上镜像标签（拿到 {value!r}）：{proc.stderr.strip() or '无输出'}")
+    return value
+
+
+def fetch_origin() -> bool:
+    """把 origin 拉新。失败返回 False。"""
+    proc = subprocess.run(["git", "-C", str(REPO), "fetch", "origin", "--quiet"],
+                          capture_output=True, text=True)
+    return proc.returncode == 0
+
+
+def trunk_verdict(ref: str, trunk: str = "origin/main") -> tuple:
+    """ref 在不在主干这条线上。返回 (判决, 一句人话)，判决三选一：on / off / unknown。
+
+    **用 `merge-base --is-ancestor` 而不是「等于 trunk」。** 准则 18 原话：回滚到
+    一个更早的 commit 是正当操作，只要它确实在主干这条线上。写成相等的话，
+    每一次正当回滚都会被报成漂移 —— 而回滚恰恰是最不需要一条看不懂的红灯的时刻。
+
+    **为什么拉不到 origin 不是直接判 unknown。** 陈旧的 origin/main 只会造成
+    **单向**的错：一个 commit 若是旧主干的祖先，它必然也是新主干的祖先，所以
+    `True` 在陈旧基线下依然可信；只有 `False` 可能是「其实已经合进去了，只是
+    这次没拉到」。于是拉不到时 True 照常放行，False 降级成 unknown。
+    不这么分的话，一次网络抖动就会把一条正常的绿变成 rc=2 的橙 —— 而这条链路
+    有据可查地会抖（Mac 侧实测多次），天天亮的橙灯等于没有灯（准则 28）。
+    """
+    fetched = fetch_origin()
+    short = ref[:12]
+    exists = subprocess.run(
+        ["git", "-C", str(REPO), "cat-file", "-e", f"{ref}^{{commit}}"],
+        capture_output=True).returncode == 0
+    if not exists:
+        if not fetched:
+            return "unknown", f"{short} 本地没有，且这次没拉到 origin —— 判不了"
+        return "off", f"{short} 在 origin 上根本不存在（线上跑着一个没推上来的版本）"
+    if subprocess.run(
+            ["git", "-C", str(REPO), "merge-base", "--is-ancestor", ref, trunk],
+            capture_output=True).returncode == 0:
+        return "on", f"{short} 在 {trunk} 这条线上"
+    if not fetched:
+        return "unknown", (f"{short} 看着不在主干上，但这次没拉到 origin，"
+                           "本地主干可能是陈旧的 —— 不作判决")
+    return "off", f"{short} 不在 {trunk} 这条线上"
+
+
 def git_side(ref: str) -> dict:
     """{path: sha256} for everything in that commit."""
     out = {}
-    for path in run(["git", "ls-tree", "-r", "--name-only", ref]).splitlines():
+    for path in run(["git", "-C", str(REPO), "ls-tree", "-r", "--name-only", ref]).splitlines():
         if ignored(path):
             continue
-        blob = subprocess.run(["git", "show", f"{ref}:{path}"],
+        blob = subprocess.run(["git", "-C", str(REPO), "show", f"{ref}:{path}"],
                               check=True, capture_output=True).stdout
         out[path] = hashlib.sha256(blob).hexdigest()
     return out
@@ -137,7 +196,9 @@ def write_status(path: str, verdict: str, detail: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", default="origin/main")
+    ap.add_argument("--ref", default=None,
+                    help="拿哪个 commit 当基准；缺省 = 读线上 PORTAL_IMAGE_TAG "
+                         "（即「线上实际跑的那个」，不是主干 tip）")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--status-file", default=None,
                     help="把判决写成 fleet-ops 巡检的契约格式")
@@ -147,18 +208,38 @@ def main() -> int:
                     help="列出其中**git 曾经跟踪、后来删掉**的那些——只有这批可以自动删")
     args = ap.parse_args()
 
+    # 基准是**线上实际跑的那个 commit**，不是主干 tip。
+    # 写成「等于 tip」的话，每次发布之后到下次发布之前这条检查会一直红，任何一次
+    # 正当回滚也当场变红——而回滚恰恰是最不需要一条看不懂的红灯的时刻。
+    listing = args.list_extra or args.list_prunable
     try:
-        # fetch 失败必须当「查不了」，不能当「一致/漂了」：拿陈旧的 origin/main 去比，
-        # NAS 上刚发布的新版本会被判成「内容不同」——一条查不出所以然的假红。
-        fetch = subprocess.run(["git", "fetch", "origin", "--quiet"],
-                               capture_output=True, text=True)
-        if fetch.returncode != 0:
-            msg = "拉不到 origin，主干基线是陈旧的，本次不作判决"
-            print(msg, file=sys.stderr)
+        ref = args.ref or live_commit()
+    except SystemExit as exc:
+        msg = str(exc)
+        print(msg, file=sys.stderr)
+        if args.status_file:
+            write_status(args.status_file, "error", msg)
+        return 2
+
+    # 列举模式不出判决（它给 release.sh 提供机器可读清单），因此跳过主干判，
+    # 也不写状态文件——否则一次取清单会覆盖巡检的判决。
+    if not listing:
+        trunk, why = trunk_verdict(ref)
+        if trunk == "unknown":
+            print(f"🟠 {why}", file=sys.stderr)
             if args.status_file:
-                write_status(args.status_file, "error", msg)
+                write_status(args.status_file, "error", why)
             return 2
-        want = git_side(args.ref)
+        if trunk == "off":
+            # 文件对不对得上它是次要的：主干上没有这个版本，下一个人从 main 出发
+            # 做的任何事都会把它悄悄抹掉，而且不会有冲突提示（准则 18）。
+            print(f"❌ 线上跑的 commit 不在主干上：{why}")
+            if args.status_file:
+                write_status(args.status_file, "drift", why)
+            return 1
+
+    try:
+        want = git_side(ref)
         got = nas_side()
     except subprocess.CalledProcessError as exc:
         msg = f"取数失败，不作判决：{exc}"
@@ -174,7 +255,7 @@ def main() -> int:
     differs = sorted(p for p in set(want) & set(got) if want[p] != got[p])
 
     verdict = {
-        "ref": args.ref,
+        "ref": ref,
         "checked": len(set(want) | set(got)),
         "missing_on_nas": only_git,
         "only_on_nas": only_nas,
@@ -198,14 +279,14 @@ def main() -> int:
         # 那份还等于历史里某一版。生产上手改过、git 又删了的文件只满足前者，删了
         # 那些改动就真没了。所以比的是内容指纹，不是路径是否出现过。
         for p in only_nas:
-            if got[p] in historical_hashes(p, args.ref):
+            if got[p] in historical_hashes(p, ref):
                 print(p)
             elif got[p] in historical_hashes(p, None):
                 # 内容真实存在，只是不在这条发布线上：多半是部署不完整，或有人
                 # 从别的分支拷了一份进生产。**它是信号，不是垃圾**——删掉等于把
                 # 信号抹了，下次照样发生而没人知道为什么。
                 print(f"跳过 {p}：这份内容在别的分支或更新的提交里能找到，但不在 "
-                      f"{args.ref} 这条线上——多半是部署不完整或有人从分支拷了一份，"
+                      f"{ref} 这条线上——多半是部署不完整或有人从分支拷了一份，"
                       "不是孤儿", file=sys.stderr)
             elif was_ever_tracked(p):
                 # git 认识这条路径，但这份内容在任何提交里都找不到。
@@ -216,9 +297,9 @@ def main() -> int:
     if args.json:
         print(json.dumps(verdict, ensure_ascii=False, indent=2))
     else:
-        print(f"比对 {args.ref} ↔ {NAS}:{SRC}（并集 {verdict['checked']} 个文件）")
+        print(f"比对线上 {ref[:12]} ↔ {NAS}:{SRC}（并集 {verdict['checked']} 个文件）")
         if verdict["clean"]:
-            print("✅ 一致：线上会被执行的东西等于该 commit")
+            print("✅ 一致：线上会被执行的东西等于它自己声明的那个 commit，且该 commit 在主干上")
         else:
             for label, items in (("git 有、NAS 没有", only_git),
                                  ("只在 NAS 上存在", only_nas),
@@ -230,7 +311,7 @@ def main() -> int:
 
     if args.status_file:
         if verdict["clean"]:
-            detail = f"{verdict['checked']} 个文件等于 {args.ref}"
+            detail = f"{verdict['checked']} 个文件等于线上 {ref[:12]}"
         else:
             parts = []
             for label, items in (("git 有 NAS 没有", only_git),

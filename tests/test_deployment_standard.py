@@ -47,8 +47,10 @@ class ReleasePathTests(unittest.TestCase):
     def test_artifact_is_a_commit_not_the_working_tree(self):
         """准则 1：发布物必须等于某个 commit。`cat 工作树文件 | ssh` 会把本机任何
         未提交的改动一起发上去，于是「线上是哪个 commit」没有答案。"""
-        # 真正的投放这一步（--format=tar 那条，区别于 dry-run 里只用来数条目的）
-        publish = [l for l in RELEASE.splitlines() if "archive --format=tar" in l]
+        # 只看投放那一步（[4/7] 段）。回滚里也有一处 archive——那是 T-0101 之后
+        # 「回滚要把源码树也同步回去」的正当用法，不该把这条断言顶红。
+        publish_block = RELEASE.split("[4/7]", 1)[1].split("[5/7]", 1)[0]
+        publish = [l for l in publish_block.splitlines() if "archive --format=tar" in l]
         self.assertEqual(len(publish), 1, "投放必须且只能走 git archive")
         self.assertNotIn("cat \"$REPO/$f\"", RELEASE)
 
@@ -220,17 +222,17 @@ class PruneContentGateTests(unittest.TestCase):
         """`--all` 会把**任何分支**上的内容都算成「历史里找得到」。真机上撞出来的
         形态（kg-hub-edit）：NAS 跑着旧 commit，目录里却有来自**更新**提交的文件
         ——它不是孤儿，是**部署不完整的信号**，删掉等于把信号抹了。"""
-        import os
         mod = self._module()
         with tempfile.TemporaryDirectory() as tmp:
             sha = self._temp_repo(tmp)
-            cwd = os.getcwd()
+            # git 调用已统一到 `-C REPO`，不再看 cwd —— 所以这里换掉 REPO 而不是 chdir。
+            old = mod.REPO
             try:
-                os.chdir(tmp)
+                mod.REPO = pathlib.Path(tmp)
                 anc = mod.historical_hashes("f.txt", "main")
                 everywhere = mod.historical_hashes("f.txt", None)
             finally:
-                os.chdir(cwd)
+                mod.REPO = old
         self.assertIn(sha["A"], anc)
         self.assertIn(sha["C"], anc)
         self.assertNotIn(sha["B"], anc)          # 侧分支的内容不在 main 的祖先链上
@@ -240,14 +242,13 @@ class PruneContentGateTests(unittest.TestCase):
         """光证明函数对没用——还得证明**有人在用它，并且传对了 ref**。
         （kg-hub-edit 的变异验证里，「把判据退回 was_ever_tracked」没转红，就是因为
         用例只验了函数本身、从没跑过调用点。）这里真跑 main()。"""
-        import os
         from unittest import mock
         mod = self._module()
         with tempfile.TemporaryDirectory() as tmp:
             sha = self._temp_repo(tmp)
-            cwd = os.getcwd()
+            old = mod.REPO
             try:
-                os.chdir(tmp)
+                mod.REPO = pathlib.Path(tmp)
                 with mock.patch.object(mod, "git_side", lambda ref: {}), \
                      mock.patch.object(mod, "nas_side", lambda: {"f.txt": sha["B"]}), \
                      mock.patch.object(sys, "argv",
@@ -256,7 +257,7 @@ class PruneContentGateTests(unittest.TestCase):
                      mock.patch("sys.stderr", new_callable=io.StringIO) as err:
                     rc = mod.main()
             finally:
-                os.chdir(cwd)
+                mod.REPO = old
         self.assertEqual(rc, 0)
         # 侧分支的内容不该进可删清单……
         self.assertEqual(out.getvalue().strip(), "")
@@ -336,6 +337,127 @@ class DriftDetectionTests(unittest.TestCase):
         """取数失败必须和「一致」区分开，否则 ssh 挂掉会被读成体检通过。"""
         self.assertIn("取数失败，不作判决", DRIFT)
         self.assertIn("return 2", DRIFT)
+
+
+class DeployedCommitBaselineTests(unittest.TestCase):
+    """基准是**线上实际跑的那个 commit**，不是主干 tip（T-0101 / T-0099 B）。
+
+    写成「等于 tip」的话，每次发布之后到下次发布之前这条检查会一直红（合了就红、
+    发了才绿），任何一次正当回滚也当场变红——而回滚恰恰是最不需要一条看不懂的
+    红灯的时刻。
+    """
+
+    @staticmethod
+    def _module():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "portal_drift3", ROOT / "deploy" / "check_source_drift.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_default_baseline_is_the_live_tag_not_the_trunk_tip(self):
+        src = (ROOT / "deploy" / "check_source_drift.py").read_text(encoding="utf-8")
+        self.assertIn('ap.add_argument("--ref", default=None', src)
+        self.assertIn("args.ref or live_commit()", src)
+        # 取数适配器读的必须是 release.sh 自己写的那个标记
+        self.assertIn("PORTAL_IMAGE_TAG", src)
+
+    def test_trunk_membership_uses_is_ancestor_not_equality(self):
+        """准则 18：回滚到更早的 commit 是正当操作，只要它在主干这条线上。"""
+        src = (ROOT / "deploy" / "check_source_drift.py").read_text(encoding="utf-8")
+        self.assertIn('"merge-base", "--is-ancestor", ref, trunk', src)
+
+    def test_a_failed_fetch_degrades_in_one_direction_only(self):
+        """陈旧的 origin/main 只造成单向的错：True 仍可信（旧主干的祖先必然也是新
+        主干的祖先），只有 False 可能是「其实已合进去、只是这次没拉到」。
+        写成「拉不到就一律不判决」的话，一次网络抖动会把正常的绿变成橙，而这条
+        链路有据可查地会抖——天天亮的橙灯等于没有灯。"""
+        import subprocess as sp
+        mod = self._module()
+        # 真跑：临时仓**故意不配 origin**，于是 fetch 必失败。
+        # 断言写成「on 出现在 degrade 之前」是不够的——给 on 分支加个 `and fetched`
+        # 就毁掉了单向降级，而两段的先后位置纹丝不动，那种写法当场放行（实测）。
+        with tempfile.TemporaryDirectory() as tmp:
+            run = lambda *a: sp.run(a, cwd=tmp, check=True, capture_output=True)
+            run("git", "init", "-q", "-b", "main")
+            run("git", "config", "user.email", "t@t"); run("git", "config", "user.name", "t")
+            (pathlib.Path(tmp) / "f").write_text("1")
+            run("git", "add", "-A"); run("git", "commit", "-qm", "1")
+            sha = sp.run(["git", "rev-parse", "HEAD"], cwd=tmp,
+                         capture_output=True, text=True).stdout.strip()
+            old = mod.REPO
+            try:
+                mod.REPO = pathlib.Path(tmp)
+                self.assertFalse(mod.fetch_origin(), "本用例的前提是 fetch 失败")
+                # 方向一：拉不到 origin，但它确实是 main 的祖先 → True 仍可信，放行
+                self.assertEqual(mod.trunk_verdict(sha, "main")[0], "on")
+                # 方向二：看着不在主干上、又没拉到 → 不能判 off。它可能其实已经合
+                # 进去了，只是这次没拉到；判 off 就是把一条查不出所以然的红灯挂上去。
+                run("git", "checkout", "-qb", "side")
+                (pathlib.Path(tmp) / "f").write_text("2")
+                run("git", "add", "-A"); run("git", "commit", "-qm", "2")
+                side = sp.run(["git", "rev-parse", "HEAD"], cwd=tmp,
+                              capture_output=True, text=True).stdout.strip()
+                run("git", "checkout", "-q", "main")
+                self.assertEqual(mod.trunk_verdict(side, "main")[0], "unknown")
+            finally:
+                mod.REPO = old
+
+    def test_trunk_verdict_is_copied_verbatim_from_kg_hub(self):
+        """T-0099 A 项要把这段策略收进 fleet-ops；改写它会让 A 项从「合并三份相同
+        实现」变成「论证三份不同实现等价」。所以这里钉住它是抄来的原样。"""
+        src = (ROOT / "deploy" / "check_source_drift.py").read_text(encoding="utf-8")
+        for line in ('def trunk_verdict(ref: str, trunk: str = "origin/main")',
+                     'return "unknown", f"{short} 本地没有，且这次没拉到 origin —— 判不了"',
+                     'return "off", f"{short} 在 origin 上根本不存在（线上跑着一个没推上来的版本）"',
+                     'return "on", f"{short} 在 {trunk} 这条线上"'):
+            self.assertIn(line, src)
+
+    def test_listing_modes_do_not_judge_or_write_status(self):
+        """列举模式是给 release.sh 的机器可读清单，不是判决。让它出判决的话，
+        一次取清单就会覆盖巡检的状态文件。"""
+        src = (ROOT / "deploy" / "check_source_drift.py").read_text(encoding="utf-8")
+        self.assertIn("listing = args.list_extra or args.list_prunable", src)
+        self.assertIn("if not listing:", src)
+
+    def test_off_trunk_is_drift_and_unknown_is_error(self):
+        """三态必须分开：「不在主干上」是真问题（rc=1），「判不了」不是（rc=2）。"""
+        src = (ROOT / "deploy" / "check_source_drift.py").read_text(encoding="utf-8")
+        blk = src.split("if not listing:", 1)[1].split("try:", 1)[0]
+        self.assertIn('write_status(args.status_file, "error", why)', blk)
+        self.assertIn('write_status(args.status_file, "drift", why)', blk)
+        self.assertIn("return 2", blk)
+        self.assertIn("return 1", blk)
+
+    def test_trunk_verdict_really_classifies(self):
+        """真跑一遍：侧分支上的 commit 不在 main 这条线上。"""
+        import os, subprocess as sp
+        mod = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            run = lambda *a: sp.run(a, cwd=tmp, check=True, capture_output=True)
+            run("git", "init", "-q", "-b", "main")
+            run("git", "config", "user.email", "t@t"); run("git", "config", "user.name", "t")
+            (pathlib.Path(tmp) / "f").write_text("1")
+            run("git", "add", "-A"); run("git", "commit", "-qm", "1")
+            main_sha = sp.run(["git", "rev-parse", "HEAD"], cwd=tmp,
+                              capture_output=True, text=True).stdout.strip()
+            run("git", "checkout", "-qb", "side")
+            (pathlib.Path(tmp) / "f").write_text("2")
+            run("git", "add", "-A"); run("git", "commit", "-qm", "2")
+            side_sha = sp.run(["git", "rev-parse", "HEAD"], cwd=tmp,
+                              capture_output=True, text=True).stdout.strip()
+            run("git", "checkout", "-q", "main")
+            # 没有 origin 的话 fetch 会失败，侧分支会被**单向降级**判成 unknown ——
+            # 那是正确行为，但本用例要验的是 on/off 的分类，所以给它一个 origin。
+            run("git", "remote", "add", "origin", tmp)
+            old_repo = mod.REPO
+            try:
+                mod.REPO = pathlib.Path(tmp)
+                self.assertEqual(mod.trunk_verdict(main_sha, "main")[0], "on")
+                self.assertEqual(mod.trunk_verdict(side_sha, "main")[0], "off")
+            finally:
+                mod.REPO = old_repo
 
 
 if __name__ == "__main__":
