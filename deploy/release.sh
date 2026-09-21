@@ -112,14 +112,14 @@ REMOTE
   # 拿不到 TOTAL 标记 = 这次没列成，什么都不删。失败方向恒为「保留」——
   # 少删一份只是多占几十 K，删错一份是不可逆的。
   if [ "$rc" != "0" ] || ! printf '%s' "$out" | grep -q '^TOTAL='; then
-    say "   备份保留：列不出备份（退出 $rc），本次不清理"
+    say "   备份保留：列不出备份（退出 ${rc}），本次不清理"
     return 0
   fi
   local total deleted size
   total=$(printf '%s' "$out" | sed -n 's/^TOTAL=//p')
   deleted=$(printf '%s\n' "$out" | grep -c '^DEL=' || true)
   size=$(printf '%s' "$out" | sed -n 's/^SIZE=//p')
-  say "   备份保留：原有 $total 份，删 $deleted 份（保留最近 $keep），当前占用 ${size:-?}"
+  say "   备份保留：原有 $total 份，删 $deleted 份（保留最近 ${keep}），当前占用 ${size:-?}"
 }
 
 
@@ -177,7 +177,7 @@ prune_extras() {
   # 预料中的码」——检查器崩掉给的是 rc=1，输出同样为空，会直接落进「没有多余
   # 文件」，把崩溃播报成清理干净。失败方向永远是「不删」。
   if [ "$rc" != "0" ]; then
-    say "      ⚠️ 拿不到清单（检测退出 $rc），本次不删任何东西"
+    say "      ⚠️ 拿不到清单（检测退出 ${rc}），本次不删任何东西"
     say "         宁可留着让漂移检测继续报，也不在没查清时删生产上的文件"
     return 0
   fi
@@ -223,13 +223,13 @@ if [ "$MODE" = "rollback" ]; then
   [ -n "$ROLLBACK_SHA" ] || die "rollback 需要一个镜像标签（sha）"
   acquire_lock   # 回滚也写 .env、也重启容器、现在还会删文件，和发布互斥
   on_nas "$DK image inspect $IMAGE:$ROLLBACK_SHA >/dev/null 2>&1" \
-    || die "NAS 上没有镜像 $IMAGE:$ROLLBACK_SHA，无法回滚到它"
+    || die "NAS 上没有镜像 $IMAGE:${ROLLBACK_SHA}，无法回滚到它"
 
   # 先记下**被撤销的是哪一次**，再覆盖 .env。下面清理残留要靠它：那些多出来的
   # 文件正是这次发布放上去的，可从它的祖先链取回。读不到就不清，只报。
   UNDOING=$(on_nas "grep '^PORTAL_IMAGE_TAG=' $SRC/.env 2>/dev/null | cut -d= -f2-" || true)
 
-  say "回滚到 $IMAGE:$ROLLBACK_SHA（撤销 ${UNDOING:-<读不到上一个标签>}）"
+  say "回滚到 $IMAGE:${ROLLBACK_SHA}（撤销 ${UNDOING:-<读不到上一个标签>}）"
   on_nas "cd $SRC && printf 'PORTAL_IMAGE_TAG=%s\n' '$ROLLBACK_SHA' > .env && \
           $DK compose -p $PROJECT up -d --no-build $SERVICE >/dev/null 2>&1 && echo ok"
   sleep 3
@@ -240,7 +240,7 @@ if [ "$MODE" = "rollback" ]; then
   # 服务已恢复，再让源码树跟着回去。顺序刻意如此：镜像不可变，源码内容不影响
   # 正在跑的容器，所以服务优先；源码没同步上只是「待修」，不该拖着服务不恢复。
   if ! git -C "$REPO" cat-file -e "${ROLLBACK_SHA}^{commit}" 2>/dev/null; then
-    say "⚠️ 本地没有 commit $ROLLBACK_SHA，源码树未同步（服务已回滚）"
+    say "⚠️ 本地没有 commit ${ROLLBACK_SHA}，源码树未同步（服务已回滚）"
     exit 0
   fi
 
@@ -279,15 +279,15 @@ SHA=$(git -C "$REPO" rev-parse "$REF^{commit}") || die "解析不了 $REF"
 SHORT=$(git -C "$REPO" rev-parse --short "$SHA")
 git -C "$REPO" merge-base --is-ancestor "$SHA" origin/main \
   || die "$SHORT 不在 origin/main 这条线上——改代码走分支，发布前先合回主干（准则 18）"
-say "      发布 $SHORT（已确认在主干上）"
+say "      发布 ${SHORT}（已确认在主干上）"
 
 # 工作树脏不影响发布物（git archive 取的是 commit），但要让人知道发的不是眼前这份
 if ! git -C "$REPO" diff --quiet || ! git -C "$REPO" diff --cached --quiet; then
-  say "      注意：工作树有未提交改动，它们【不会】被发布（发的是 $SHORT）"
+  say "      注意：工作树有未提交改动，它们【不会】被发布（发的是 ${SHORT}）"
 fi
 
 if [ "$DRY" = "1" ]; then
-  say "[dry-run] 将发布 $SHORT，共 $(git -C "$REPO" archive "$SHA" | tar -t | wc -l | tr -d ' ') 个条目"
+  say "[dry-run] 将发布 ${SHORT}，共 $(git -C "$REPO" archive "$SHA" | tar -t | wc -l | tr -d ' ') 个条目"
   exit 0
 fi
 
@@ -390,7 +390,7 @@ if [ "$running" != "$IMAGE:$SHORT" ] || [ "$code" != "200" ] || [ "$pcode" != "2
     on_nas "cd '$SRC' && printf 'PORTAL_IMAGE_TAG=%s\n' '$PREV' > .env && \
             $DK compose -p $PROJECT up -d --no-build $SERVICE >/dev/null 2>&1 && echo '      已回滚'"
   fi
-  die "验收未通过（镜像=$running health=$code portal=$pcode）"
+  die "验收未通过（镜像=$running health=$code portal=${pcode}）"
 fi
 
 say "✅ $SHORT 已上线：$PORTAL_URL_"
@@ -412,7 +412,7 @@ if [ -f "$CHECKER" ]; then
   case "$DRIFT_RC" in
     0) say "   漂移判决已刷新：一致" ;;
     1) say "   漂移判决已刷新：有漂移（或刷新中途失败）——以 $STATUS_FILE 的时间戳为准" ;;
-    *) say "   ⚠️ 漂移判决没刷成（退出 $DRIFT_RC）：$STATUS_FILE 里可能还是发布前那条，别拿它当结论" ;;
+    *) say "   ⚠️ 漂移判决没刷成（退出 ${DRIFT_RC}）：$STATUS_FILE 里可能还是发布前那条，别拿它当结论" ;;
   esac
 fi
 prune_backups

@@ -563,6 +563,46 @@ class DeployedCommitBaselineTests(unittest.TestCase):
         co_tail = cmd.split("checkout -q --detach origin/main", 1)[1].split(";", 1)[0]
         self.assertIn("|| exit 2", co_tail, "checkout 失败必须停下")
 
+    def test_release_survives_a_utf8_locale(self):
+        """准则 31：中文紧跟在 $VAR 后面时，bash 3.2 在 UTF-8 下会把它的字节吃进变量名。
+
+        2026-09-21 实测：`LC_ALL=en_US.UTF-8 bash deploy/release.sh --dry-run`
+        死在 `SHORT\xef: unbound variable` —— **第 1 步就崩**。
+
+        而本会话的工具 shell LANG 是空的，于是同一天四次真发版全都正常通过。
+        **最危险的恰恰是人手在自己终端上敲发版** —— 终端默认就是 UTF-8。
+        「在我这儿好好的」在这条上等于没验。
+
+        所以这必须是**行为**用例，且必须显式设 UTF-8；写成 grep 源码的静态检查
+        既挡不住新写的一行，也证明不了它真能跑。
+        """
+        import subprocess as sp
+        proc = sp.run(["bash", str(ROOT / "deploy" / "release.sh"), "--dry-run"],
+                      capture_output=True, text=True, timeout=180, cwd=str(ROOT),
+                      env=dict(os.environ, LC_ALL="en_US.UTF-8", LANG="en_US.UTF-8"))
+        both = proc.stdout + proc.stderr
+        self.assertNotIn("unbound variable", both, both[-500:])
+        # 非空断言：证明它真的走到了带中文的输出行，不是在更早的地方就退了
+        self.assertIn("已确认在主干上", both, both[-500:])
+        self.assertEqual(proc.returncode, 0, both[-500:])
+
+    def test_no_bare_var_immediately_followed_by_cjk(self):
+        """上一条跑不到的脚本，由这张网兜住（安装脚本没法在用例里真装）。
+
+        判据是「$VAR 后面紧跟非 ASCII」，修法是加花括号 ${VAR}。注释行不算 ——
+        注释不会被展开，把它算进来只会让人不敢写中文注释。
+        """
+        import re
+        pat = re.compile(r"\$[A-Za-z_][A-Za-z_0-9]*(?=[^\x00-\x7f])")
+        bad = []
+        for sh in sorted((ROOT / "deploy").rglob("*.sh")):
+            for i, line in enumerate(sh.read_text("utf-8").splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if pat.search(line):
+                    bad.append(f"{sh.relative_to(ROOT)}:{i}  {line.strip()[:70]}")
+        self.assertEqual(bad, [], "这些地方 UTF-8 下会报 unbound variable：\n" + "\n".join(bad))
+
     def test_release_refuses_to_run_under_sh_or_zsh(self):
         """用错 shell 要在**动 NAS 之前**就停，不是跑到一半再炸。
 

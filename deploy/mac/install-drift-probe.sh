@@ -49,7 +49,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 2
 done
 if [ -s "$STATUS" ]; then
-  say "      $STATUS："
+  say "      ${STATUS}："
   say "      $(cat "$STATUS")"
 else
   say "      ⚠️ 还没写出判决——看 ~/Library/Logs/report-portal-source-drift.err.log"
