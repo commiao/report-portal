@@ -9,6 +9,19 @@
   这里跑 __HOME__/.local/share/report-portal/repo 这个私有 clone，只从 origin
   快进；共享工作树里谁有在途改动，都不会悄悄改变这个探针的行为。
 
+  跑之前先把工作树切到 origin/main。
+  **fetch 不动工作树** —— 装上那天检出的是哪个 commit，之后就一直跑哪个。
+  2026-09-21 实测：克隆停在 af6439c，而主干早已走远，于是这个探针天天写出
+  新鲜的时间戳、用的却是装机那天的判断逻辑。这正是它自己要治的那种病
+  （新鲜的时间戳盖着陈旧的结论），只不过病在检查器自己身上。
+
+  两种失败刻意分开：
+    fetch 失败    → 照跑。本地 origin/main 还在，陈旧只造成单向的错（见
+                    fleetops_drift.trunk_verdict 的注释），而这条链路有据可查
+                    地会抖，天天亮的橙灯等于没有灯。
+    checkout 失败 → exit 2。那不是抖，是克隆真的坏了（脏了 / refs 没了），
+                    此时跑出来的任何结论都不知道是哪一版算的。
+
   安装：deploy/mac/install-drift-probe.sh
 -->
 <plist version="1.0">
@@ -29,7 +42,7 @@
     <array>
         <string>/bin/sh</string>
         <string>-c</string>
-        <string>cd "$HOME/.local/share/report-portal/repo" &amp;&amp; /usr/bin/python3 deploy/check_source_drift.py --status-file "$HOME/.cache/report-portal/source-drift.status"; rc=$?; [ $rc -le 1 ] &amp;&amp; exit 0; exit $rc</string>
+        <string>cd "$HOME/.local/share/report-portal/repo" || exit 2; git fetch origin --quiet; git checkout -q --detach origin/main || exit 2; /usr/bin/python3 deploy/check_source_drift.py --status-file "$HOME/.cache/report-portal/source-drift.status"; rc=$?; [ $rc -le 1 ] &amp;&amp; exit 0; exit $rc</string>
     </array>
 
     <!-- 巡检每天跑一次；hook 那边 36 小时算停更，留了一次失败的余量。 -->

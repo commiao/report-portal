@@ -513,6 +513,31 @@ class DeployedCommitBaselineTests(unittest.TestCase):
         # 取数适配器读的必须是 release.sh 自己写的那个标记
         self.assertIn("PORTAL_IMAGE_TAG", src)
 
+    def test_probe_updates_its_checkout_before_running(self):
+        """探针必须先把工作树切到主干，再跑检查器。
+
+        `git fetch` **不动工作树**：装上那天检出的是哪个 commit，之后就一直跑
+        哪个。2026-09-21 实测私有克隆停在 af6439c，而主干早已走远 —— 于是这个
+        探针天天写出新鲜的时间戳、用的却是装机那天的逻辑。它自己就是来治
+        「新鲜时间戳盖着陈旧结论」的，结果病在它自己身上。
+
+        两种失败要分开，所以这里分别钉：fetch 失败照跑（本地 origin/main 还在，
+        陈旧只造成单向的错），checkout 失败 exit 2（克隆真坏了，此时任何结论都
+        不知道是哪一版算的）。
+        """
+        import plistlib
+        plist = ROOT / "deploy" / "mac" / "agents" / "com.report-portal.source-drift.plist"
+        cmd = plistlib.loads(plist.read_bytes())["ProgramArguments"][2]
+        self.assertIn("checkout -q --detach origin/main", cmd)
+        self.assertLess(cmd.index("checkout -q --detach"), cmd.index("check_source_drift.py"),
+                        "切主干必须在跑检查器之前")
+        # fetch 后面不许跟 || exit —— 抖一下不该变成橙灯
+        fetch_tail = cmd.split("git fetch origin --quiet", 1)[1].split(";", 1)[0]
+        self.assertNotIn("exit", fetch_tail, "fetch 失败应当照跑")
+        # checkout 后面必须跟 || exit 2
+        co_tail = cmd.split("checkout -q --detach origin/main", 1)[1].split(";", 1)[0]
+        self.assertIn("|| exit 2", co_tail, "checkout 失败必须停下")
+
     def test_release_refuses_to_run_under_sh_or_zsh(self):
         """用错 shell 要在**动 NAS 之前**就停，不是跑到一半再炸。
 
