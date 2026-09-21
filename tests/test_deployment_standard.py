@@ -501,7 +501,7 @@ class DeployedCommitBaselineTests(unittest.TestCase):
         """T-0099 A 项要把这段策略收进 fleet-ops；改写它会让 A 项从「合并三份相同
         实现」变成「论证三份不同实现等价」。所以这里钉住它是抄来的原样。"""
         src = (ROOT / "deploy" / "check_source_drift.py").read_text(encoding="utf-8")
-        for line in ('def trunk_verdict(ref: str, trunk: str = "origin/main")',
+        for line in ('def trunk_verdict(ref: str, trunk: str = "origin/main") -> tuple[str, str]:',
                      'return "unknown", f"{short} 本地没有，且这次没拉到 origin —— 判不了"',
                      'return "off", f"{short} 在 origin 上根本不存在（线上跑着一个没推上来的版本）"',
                      'return "on", f"{short} 在 {trunk} 这条线上"'):

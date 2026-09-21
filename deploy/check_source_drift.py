@@ -119,7 +119,7 @@ def fetch_origin() -> bool:
     return proc.returncode == 0
 
 
-def trunk_verdict(ref: str, trunk: str = "origin/main") -> tuple:
+def trunk_verdict(ref: str, trunk: str = "origin/main") -> tuple[str, str]:
     """ref 在不在主干这条线上。返回 (判决, 一句人话)，判决三选一：on / off / unknown。
 
     **用 `merge-base --is-ancestor` 而不是「等于 trunk」。** 准则 18 原话：回滚到
