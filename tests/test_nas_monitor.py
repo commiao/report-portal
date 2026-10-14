@@ -169,7 +169,8 @@ class CollectTests(unittest.TestCase):
                                        {"com.docker.compose.project": "recruitment-intel-nas"}), "zhaopin")
         self.assertEqual(nm.project_of(REGISTRY, "t0195-v39-s14-joint", {}), "experiments")
         self.assertEqual(nm.project_of(REGISTRY, "charming_chebyshev", {}), "temporary")
-        self.assertEqual(nm.project_of(REGISTRY, "report-portal", {"com.docker.compose.project": "report-portal-src"}), "other")
+        self.assertEqual(nm.project_of(REGISTRY, "report-portal", {"com.docker.compose.project": "report-portal-src"}), "report-portal")
+        self.assertEqual(nm.project_of(REGISTRY, "task-hub", {"com.docker.compose.project": "task-hub"}), "other")
 
 
 class EvaluateTests(unittest.TestCase):
@@ -484,6 +485,8 @@ class RegistryTests(unittest.TestCase):
         block = compose.split("\n  nas_monitor:\n", 1)[1].split("\nnetworks:\n", 1)[0]
         mounts = re.findall(r"- [^:\s]+:(/host/[^:\s]+):ro", block)
         self.assertTrue(mounts)
+        mounts.append("/data")                     # 监控自己的数据目录（可写，见 compose）
+        self.assertIn(":/data\n", block)
         paths = [s["statvfs_path"] for s in REGISTRY["devices"].values()]
         for p in REGISTRY["projects"]:
             paths += [s["path"] for s in p.get("paths", [])]
@@ -538,3 +541,63 @@ class ReleaseScriptTests(unittest.TestCase):
         dirs = re.search(r'MONITOR_DIRS="\$\{PORTAL_MONITOR_DIRS:-([^}]*)\}"', self.RELEASE).group(1).split()
         for d in dirs:
             self.assertIn(f"- {d}:", compose)
+
+
+class PortalImageRetentionTests(unittest.TestCase):
+    """deploy/release.sh 第 9 步：发布成功后清 report-portal 的旧镜像（真跑这一段）。"""
+    RELEASE = (ROOT / "deploy" / "release.sh").read_text("utf-8")
+
+    def run_step(self, lib, prev="old111", rc=0):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        record = Path(tmp.name, "args.txt")
+        if lib == "stub":
+            lib_dir = Path(tmp.name, "lib")
+            lib_dir.mkdir()
+            (lib_dir / "fleetops_retention.py").write_text(
+                "import sys\n"
+                f"open({str(record)!r}, 'w').write('\\n'.join(sys.argv[1:]))\n"
+                "print('镜像 report-portal：保留 5 个，删除 2 个')\n"
+                f"sys.exit({rc})\n")
+            lib = lib_dir
+        step = self.RELEASE[self.RELEASE.index("# ---- 9. 清旧镜像"):]
+        script = Path(tmp.name, "step.sh")
+        script.write_text("set -euo pipefail\nsay() { printf '%s\\n' \"$*\"; }\n"
+                          f"NAS=nas; DK='sudo -n /dk'; IMAGE=report-portal; SHORT=new222; PREV={prev}\n"
+                          + step + "\necho done\n", encoding="utf-8")
+        env = {"PATH": os.getenv("PATH", "/usr/bin:/bin"), "HOME": tmp.name, "FLEET_OPS_LIB": str(lib)}
+        import subprocess
+        r = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+        args = record.read_text().split("\n") if record.exists() else []
+        return r, args
+
+    def test_protects_this_release_and_the_rollback_target(self):
+        r, args = self.run_step("stub")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(args[args.index("--repo") + 1], "report-portal")
+        self.assertIn("report-portal:new222", args)
+        self.assertIn("report-portal:old111", args)
+        self.assertIn("--apply", args)
+        self.assertIn("保留 5 个", r.stderr)
+
+    def test_first_release_has_no_rollback_target_to_protect(self):
+        r, args = self.run_step("stub", prev="")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([a for a in args if a.startswith("report-portal:")], ["report-portal:new222"])
+
+    def test_a_failing_cleanup_does_not_fail_the_release(self):
+        r, _ = self.run_step("stub", rc=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("done", r.stdout)
+
+    def test_missing_fleet_ops_is_said_out_loud(self):
+        r, args = self.run_step("/nowhere")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(args, [])
+        self.assertIn("没有清理旧镜像", r.stdout)
+
+    def test_every_portal_service_logs_with_the_local_driver(self):
+        compose = (ROOT / "docker-compose.yml").read_text("utf-8")
+        for service in ("report_portal", "nas_monitor"):
+            block = compose.split(f"\n  {service}:\n", 1)[1].split("\n  nas_monitor:\n", 1)[0]
+            self.assertRegex(block, r"(?m)^    logging:\n      driver: local$", service)

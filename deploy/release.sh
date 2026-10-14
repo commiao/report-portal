@@ -455,3 +455,17 @@ if [ -f "$CHECKER" ]; then
   esac
 fi
 prune_backups
+
+# ---- 9. 清旧镜像（2026-10-14）------------------------------------------------
+# nas_monitor 盘点时 report-portal 留着 30 个镜像标签：本脚本只 build 从不删。规则在
+# fleet-ops 的 lib/fleetops_retention.py（各服务共用一份）：保留最新 PORTAL_KEEP_IMAGES
+# 个，永远不删容器在用的镜像、这次的 $SHORT 和回滚目标 $PREV。放在最后、失败不让发布
+# 失败：它是收尾家务；找不到 fleet-ops 产物要说出来（准则 31：没有执行者的规矩等于没有）。
+retention="${FLEET_OPS_LIB:-$HOME/.local/share/fleet-ops/current/lib}/fleetops_retention.py"
+if [ -f "$retention" ]; then
+  python3 "$retention" images --ssh "$NAS" --docker "$DK" --repo "$IMAGE" \
+      --keep "${PORTAL_KEEP_IMAGES:-5}" --protect "$IMAGE:$SHORT" ${PREV:+--protect "$IMAGE:$PREV"} \
+      --apply 2>&1 | grep -v '^  删除 ' | sed 's/^/   /' >&2 || true
+else
+  say "   ⚠️ 没有清理旧镜像：找不到 ${retention}（fleet-ops 产物未安装）"
+fi

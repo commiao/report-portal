@@ -1,74 +1,248 @@
 {
   "_why": "nas_monitor 的登记表：每个项目在 NAS 上占用哪些存储、预算多少、容器配置要守什么规矩。改预算/加项目只改这里（进 git，随 release.sh 发布）。路径是容器内的只读挂载点，见 docker-compose.yml 的 nas_monitor.volumes。",
   "devices": {
-    "md2": {"label": "volume1", "statvfs_path": "/host/zhaopin/release-staging"},
-    "md3": {"label": "volume2", "statvfs_path": "/host/kg-hub-data"}
+    "md2": {
+      "label": "volume1",
+      "statvfs_path": "/host/zhaopin/release-staging"
+    },
+    "md3": {
+      "label": "volume2",
+      "statvfs_path": "/host/kg-hub-data"
+    }
   },
   "global": {
-    "write_kbs_1h_median": {"warn": 2500, "crit": 5000, "note": "md2+md3 写入的 1 小时分钟中位数；2026-10-10 问题现场约 6300，治理后低负载约 800"},
-    "volume_used_pct": {"warn": 80, "crit": 90},
-    "dangling_images_gb": {"warn": 2, "crit": 10, "note": "无标签的 <none> 镜像；2026-10-14 首次盘点 745 个"},
-    "build_cache_gb": {"warn": 5, "crit": 10, "note": "发布脚本只清 7 天前的缓存（fleetops_retention），7 天内的属正常"},
-    "exited_containers": {"warn": 20, "crit": 60, "note": "已退出且不属于任何登记项目 compose 的容器（实验、构建残留）"}
+    "write_kbs_1h_median": {
+      "warn": 2500,
+      "crit": 5000,
+      "note": "md2+md3 写入的 1 小时分钟中位数；2026-10-10 问题现场约 6300，治理后低负载约 800"
+    },
+    "volume_used_pct": {
+      "warn": 80,
+      "crit": 90
+    },
+    "dangling_images_gb": {
+      "warn": 2,
+      "crit": 10,
+      "note": "无标签的 <none> 镜像；2026-10-14 首次盘点 745 个"
+    },
+    "build_cache_gb": {
+      "warn": 5,
+      "crit": 10,
+      "note": "发布脚本只清 7 天前的缓存（fleetops_retention），7 天内的属正常"
+    },
+    "exited_containers": {
+      "warn": 20,
+      "crit": 60,
+      "note": "已退出且不属于任何登记项目 compose 的容器（实验、构建残留）"
+    }
   },
-  "adhoc_container_patterns": ["^t0195-"],
-  "policy_exempt_containers": {"kg-hub-templog": "磁盘温度记录器：只往文件追加，标准输出为空，db 日志驱动不产生写入（2026-10-14 核对）"},
+  "adhoc_container_patterns": [
+    "^t0195-"
+  ],
+  "policy_exempt_containers": {
+    "kg-hub-templog": "磁盘温度记录器：只往文件追加，标准输出为空，db 日志驱动不产生写入（2026-10-14 核对）"
+  },
   "projects": [
     {
       "id": "kg-hub",
       "name": "kg-hub",
-      "compose_projects": ["kg-hub"],
+      "compose_projects": [
+        "kg-hub"
+      ],
       "containers": [],
-      "image_repos": ["kg-hub-server"],
+      "image_repos": [
+        "kg-hub-server"
+      ],
       "max_image_tags": 7,
       "_max_image_tags": "release.sh 保留最新 5 个 + 当前与回滚目标 + 容器在用的，预算留 2 个余量",
-      "container_policy": {"min_healthcheck_interval_s": 60, "forbidden_log_drivers": ["db"]},
+      "container_policy": {
+        "min_healthcheck_interval_s": 60,
+        "forbidden_log_drivers": [
+          "db"
+        ]
+      },
       "paths": [
-        {"id": "ledger", "label": "任务账本 model-attempts.sqlite3", "path": "/host/kg-hub-data/ingest-backup/model-attempts.sqlite3", "warn_gb": 10, "crit_gb": 15, "max_growth_mb_per_day": 1500},
-        {"id": "ingest-backup", "label": "ingest-backup 目录", "path": "/host/kg-hub-data/ingest-backup", "warn_gb": 12, "crit_gb": 20, "max_growth_mb_per_day": 2000},
-        {"id": "falkordb", "label": "FalkorDB 数据（AOF + RDB）", "path": "/host/kg-hub-data/falkordb", "warn_gb": 3, "crit_gb": 6, "max_growth_mb_per_day": 500}
+        {
+          "id": "ledger",
+          "label": "任务账本 model-attempts.sqlite3",
+          "path": "/host/kg-hub-data/ingest-backup/model-attempts.sqlite3",
+          "warn_gb": 10,
+          "crit_gb": 15,
+          "max_growth_mb_per_day": 1500
+        },
+        {
+          "id": "ingest-backup",
+          "label": "ingest-backup 目录",
+          "path": "/host/kg-hub-data/ingest-backup",
+          "warn_gb": 12,
+          "crit_gb": 20,
+          "max_growth_mb_per_day": 2000
+        },
+        {
+          "id": "falkordb",
+          "label": "FalkorDB 数据（AOF + RDB）",
+          "path": "/host/kg-hub-data/falkordb",
+          "warn_gb": 3,
+          "crit_gb": 6,
+          "max_growth_mb_per_day": 500
+        }
       ],
       "children": [],
       "freshness": [
-        {"id": "nightly-prune", "label": "账本每晚清理（status.json）", "path": "/host/kg-hub-data/journal-prune/status.json", "json_time_field": "updated_at", "max_age_hours": 26}
+        {
+          "id": "nightly-prune",
+          "label": "账本每晚清理（status.json）",
+          "path": "/host/kg-hub-data/journal-prune/status.json",
+          "json_time_field": "updated_at",
+          "max_age_hours": 26
+        }
       ]
     },
     {
       "id": "credvault",
       "name": "credvault 模型网关",
       "compose_projects": [],
-      "containers": ["model-gateway"],
-      "image_repos": ["credvault-model-gateway"],
+      "containers": [
+        "model-gateway"
+      ],
+      "image_repos": [
+        "credvault-model-gateway"
+      ],
       "max_image_tags": 10,
       "_max_image_tags": "nas-release.sh 保留最新 5 个；网关回滚要回到原容器，停着的旧容器引用的镜像也保留（2026-10-14 实测 9 个）",
-      "container_policy": {"min_healthcheck_interval_s": 60, "forbidden_log_drivers": ["db"]},
+      "container_policy": {
+        "min_healthcheck_interval_s": 60,
+        "forbidden_log_drivers": [
+          "db"
+        ]
+      },
       "paths": [
-        {"id": "llm-requests", "label": "请求账本 llm-requests.sqlite3", "path": "/host/model-gateway/runtime/state/llm-requests.sqlite3", "warn_gb": 1.5, "crit_gb": 3, "max_growth_mb_per_day": 150},
-        {"id": "state", "label": "运行状态目录 runtime/state", "path": "/host/model-gateway/runtime/state", "warn_gb": 3, "crit_gb": 6, "max_growth_mb_per_day": 300}
+        {
+          "id": "llm-requests",
+          "label": "请求账本 llm-requests.sqlite3",
+          "path": "/host/model-gateway/runtime/state/llm-requests.sqlite3",
+          "warn_gb": 1.5,
+          "crit_gb": 3,
+          "max_growth_mb_per_day": 150
+        },
+        {
+          "id": "state",
+          "label": "运行状态目录 runtime/state",
+          "path": "/host/model-gateway/runtime/state",
+          "warn_gb": 3,
+          "crit_gb": 6,
+          "max_growth_mb_per_day": 300
+        }
       ],
       "children": [
-        {"id": "release-backups", "label": "发布源码备份 .release-backup-*", "dir": "/host/model-gateway", "pattern": "^\\.release-backup-", "keep": 10, "max_total_gb": 1},
-        {"id": "recovery-snapshots", "label": "一次性恢复快照 legacy-recovery-*", "dir": "/host/model-gateway/runtime/state", "pattern": "^legacy-recovery-", "keep": 0, "max_total_gb": 0.1},
-        {"id": "publication-evidence", "label": "配置发布取证目录 .shared-ref-publication.*", "dir": "/host/model-gateway", "pattern": "^\\.shared-ref-publication\\.", "keep": 2, "max_total_gb": 0.5}
+        {
+          "id": "release-backups",
+          "label": "发布源码备份 .release-backup-*",
+          "dir": "/host/model-gateway",
+          "pattern": "^\\.release-backup-",
+          "keep": 10,
+          "max_total_gb": 1
+        },
+        {
+          "id": "recovery-snapshots",
+          "label": "一次性恢复快照 legacy-recovery-*",
+          "dir": "/host/model-gateway/runtime/state",
+          "pattern": "^legacy-recovery-",
+          "keep": 0,
+          "max_total_gb": 0.1
+        },
+        {
+          "id": "publication-evidence",
+          "label": "配置发布取证目录 .shared-ref-publication.*",
+          "dir": "/host/model-gateway",
+          "pattern": "^\\.shared-ref-publication\\.",
+          "keep": 2,
+          "max_total_gb": 0.5
+        }
       ],
       "freshness": []
     },
     {
       "id": "zhaopin",
       "name": "zhaopin 招聘服务",
-      "compose_projects": ["recruitment-intel-nas"],
+      "compose_projects": [
+        "recruitment-intel-nas"
+      ],
       "containers": [],
-      "image_repos": ["recruitment-intel-service", "recruitment-intel-backup", "recruitment-intel-browser-sidecar"],
+      "image_repos": [
+        "recruitment-intel-service",
+        "recruitment-intel-backup",
+        "recruitment-intel-browser-sidecar"
+      ],
       "max_image_tags": 5,
       "_max_image_tags": "nas-release.sh 保留最新 3 个 + 回滚目标（按镜像 ID）",
-      "container_policy": {"min_healthcheck_interval_s": 60, "forbidden_log_drivers": ["db"]},
+      "container_policy": {
+        "min_healthcheck_interval_s": 60,
+        "forbidden_log_drivers": [
+          "db"
+        ]
+      },
       "paths": [
-        {"id": "backups", "label": "数据库备份 data/backups", "path": "/host/zhaopin/backups", "warn_gb": 2, "crit_gb": 5, "max_growth_mb_per_day": 200}
+        {
+          "id": "backups",
+          "label": "数据库备份 data/backups",
+          "path": "/host/zhaopin/backups",
+          "warn_gb": 2,
+          "crit_gb": 5,
+          "max_growth_mb_per_day": 200
+        }
       ],
       "children": [
-        {"id": "release-staging", "label": "发布包 release-staging（每个约 3GB）", "dir": "/host/zhaopin/release-staging", "pattern": "^20\\d{6}T\\d{6}Z-", "keep": 4, "max_total_gb": 13, "note": "保留最新 3 个 + 回滚目标"},
-        {"id": "build-leftovers", "label": "失败构建残留 .build-*", "dir": "/host/zhaopin/release-staging", "pattern": "^\\.build-", "keep": 0, "max_total_gb": 0.5, "max_age_hours": 2}
+        {
+          "id": "release-staging",
+          "label": "发布包 release-staging（每个约 3GB）",
+          "dir": "/host/zhaopin/release-staging",
+          "pattern": "^20\\d{6}T\\d{6}Z-",
+          "keep": 4,
+          "max_total_gb": 13,
+          "note": "保留最新 3 个 + 回滚目标"
+        },
+        {
+          "id": "build-leftovers",
+          "label": "失败构建残留 .build-*",
+          "dir": "/host/zhaopin/release-staging",
+          "pattern": "^\\.build-",
+          "keep": 0,
+          "max_total_gb": 0.5,
+          "max_age_hours": 2
+        }
       ],
+      "freshness": []
+    },
+    {
+      "id": "report-portal",
+      "name": "report-portal 门户与监控",
+      "compose_projects": [
+        "report-portal-src"
+      ],
+      "containers": [],
+      "image_repos": [
+        "report-portal"
+      ],
+      "max_image_tags": 7,
+      "_max_image_tags": "deploy/release.sh 保留最新 5 个 + 当前与回滚目标",
+      "container_policy": {
+        "min_healthcheck_interval_s": 60,
+        "forbidden_log_drivers": [
+          "db"
+        ]
+      },
+      "paths": [
+        {
+          "id": "monitor-data",
+          "label": "监控自身数据 nas-monitor.sqlite3",
+          "path": "/data/nas-monitor.sqlite3",
+          "warn_gb": 0.5,
+          "crit_gb": 1,
+          "max_growth_mb_per_day": 50
+        }
+      ],
+      "children": [],
       "freshness": []
     }
   ]
