@@ -154,6 +154,14 @@ class CollectTests(unittest.TestCase):
             t.join(5)
         self.assertGreater(sampled, 0)        # docker 还卡着，采样已经在记账了
 
+    def test_system_df_gets_a_longer_timeout_than_other_docker_calls(self):
+        reader = nm.DockerReader.__new__(nm.DockerReader)
+        reader._client = mock.Mock()
+        reader._client.get.return_value.json.return_value = {"Images": []}
+        reader.system_df()
+        self.assertEqual(reader._client.get.call_args.kwargs["timeout"], nm.DF_TIMEOUT_SECONDS)
+        self.assertGreaterEqual(nm.DF_TIMEOUT_SECONDS, 300)     # 实测 >120s
+
     def test_containers_are_attributed_to_projects(self):
         self.assertEqual(nm.project_of(REGISTRY, "kg-hub-server", {"com.docker.compose.project": "kg-hub"}), "kg-hub")
         self.assertEqual(nm.project_of(REGISTRY, "model-gateway", {}), "credvault")

@@ -57,6 +57,7 @@ FLUSH_SECONDS = 300
 DOCKER_SECONDS = 300
 SCAN_SECONDS = 1800
 DF_SECONDS = 7200          # /system/df 在这台 NAS 上要 ~2 分钟（逐层算大小），2 小时一次
+DF_TIMEOUT_SECONDS = 600
 RETENTION_DAYS = 30
 WARMUP_SECONDS = 600
 CRIT_RESEND_SECONDS = 12 * 3600
@@ -185,7 +186,11 @@ class DockerReader:
         return policy_fields(data)
 
     def system_df(self) -> dict:
-        return self._get("/system/df")
+        # 这台 NAS 上 /system/df 要逐层算 1000+ 个镜像的大小：冒烟时 112s，首次上线时
+        # 超过了 120s 的默认超时。单独放宽到 10 分钟——它在慢任务线程里，不挡采样。
+        resp = self._client.get("/system/df", timeout=DF_TIMEOUT_SECONDS)
+        resp.raise_for_status()
+        return resp.json()
 
     def events(self, since: int, until: int) -> list[dict]:
         filters = json.dumps({"type": ["container"], "event": ["create", "start"]})
