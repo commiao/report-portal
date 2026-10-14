@@ -168,6 +168,10 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(nm.project_of(REGISTRY, "recruitment-postgres",
                                        {"com.docker.compose.project": "recruitment-intel-nas"}), "zhaopin")
         self.assertEqual(nm.project_of(REGISTRY, "t0195-v39-s14-joint", {}), "experiments")
+        # 网关回滚保留的旧实例、T-0257 隔离实验网关：归 credvault，不算临时容器
+        for name in ("model-gateway-held-1ee1052a3125", "model-gateway-approved-previous-20260907",
+                     "kg-attribute-accuracy-probe", "kg-cross-episode-nodes-probe"):
+            self.assertEqual(nm.project_of(REGISTRY, name, {}), "credvault", name)
         self.assertEqual(nm.project_of(REGISTRY, "charming_chebyshev", {}), "temporary")
         self.assertEqual(nm.project_of(REGISTRY, "report-portal", {"com.docker.compose.project": "report-portal-src"}), "report-portal")
         self.assertEqual(nm.project_of(REGISTRY, "task-hub", {"com.docker.compose.project": "task-hub"}), "other")
@@ -240,6 +244,12 @@ class EvaluateTests(unittest.TestCase):
         old = {("zhaopin", "build-leftovers"): {"count": 1, "bytes": 1024, "oldest_age_h": 5, "names": []}}
         self.assertEqual(find(nm.evaluate(reg, self.snap(children=young)), "zhaopin:children-build-leftovers")["level"], "ok")
         self.assertEqual(find(nm.evaluate(reg, self.snap(children=old)), "zhaopin:children-build-leftovers")["level"], "warn")
+
+    def test_builds_in_progress_are_not_leftovers_until_they_are_old(self):
+        fresh = {("zhaopin", "build-leftovers"): {"count": 2, "bytes": 22 * 1024 ** 2, "oldest_age_h": 0.2, "names": []}}
+        stale = {("zhaopin", "build-leftovers"): {"count": 1, "bytes": 11 * 1024 ** 2, "oldest_age_h": 5, "names": []}}
+        self.assertEqual(find(nm.evaluate(REGISTRY, self.snap(children=fresh)), "zhaopin:children-build-leftovers")["level"], "ok")
+        self.assertEqual(find(nm.evaluate(REGISTRY, self.snap(children=stale)), "zhaopin:children-build-leftovers")["level"], "warn")
 
     def test_one_off_recovery_snapshots_must_not_linger(self):
         children = {("credvault", "recovery-snapshots"): {"count": 3, "bytes": int(0.65 * GiB), "oldest_age_h": 160, "names": []}}
