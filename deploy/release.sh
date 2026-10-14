@@ -57,11 +57,51 @@ SERVICE="${PORTAL_COMPOSE_SERVICE:-report_portal}"
 CONTAINER="${PORTAL_CONTAINER:-report-portal}"
 IMAGE="${PORTAL_IMAGE:-report-portal}"
 HEALTH_URL="${PORTAL_HEALTH_URL:-http://100.123.208.32:17172/health}"
+# nas_monitor：同一个镜像、同一个 compose 项目里的第二个服务（NAS 存储与写盘监控）。
+MONITOR_SERVICE="${PORTAL_MONITOR_SERVICE:-nas_monitor}"
+MONITOR_CONTAINER="${PORTAL_MONITOR_CONTAINER:-nas-monitor}"
+MONITOR_HEALTH_URL="${PORTAL_MONITOR_HEALTH_URL:-http://100.123.208.32:17174/health}"
+# 绑定挂载的源目录必须事先存在（Synology 上不存在会让容器起不来）。0700：data 里是监控
+# 自己的 SQLite，secrets 里放飞书 webhook（不进 git，由人放进去）。
+MONITOR_DIRS="${PORTAL_MONITOR_DIRS:-/volume2/4T/nas-monitor/data /volume2/4T/nas-monitor/secrets}"
 PORTAL_URL_="${PORTAL_URL:-http://100.123.208.32:17172/portal}"
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=20)
 
 LOCK="$SRC/.release.lock"
+
+# 把 .env 切到某个镜像标签并起服务。门户总是起；nas_monitor 只在那个镜像里有
+# nas_monitor.py 时才起——回滚到加监控之前的版本时，旧镜像里没有它，硬起只会
+# 让容器反复重启，所以改为把它停掉（监控是附属服务，不能拖住门户的回滚）。
+start_services() {
+  local tag="$1" build="${2:-}"
+  on_nas "cd '$SRC' && printf 'PORTAL_IMAGE_TAG=%s\n' '$tag' > .env" || return 1
+  if [ -n "$build" ]; then
+    on_nas "cd '$SRC' && $DK compose -p $PROJECT build $SERVICE >/dev/null 2>&1" || return 1
+  fi
+  if on_nas "$DK run --rm --network none --entrypoint test $IMAGE:$tag -f /app/nas_monitor.py >/dev/null 2>&1"; then
+    on_nas "mkdir -p $MONITOR_DIRS && chmod 700 $MONITOR_DIRS && cd '$SRC' && \
+            $DK compose -p $PROJECT up -d --no-build $SERVICE $MONITOR_SERVICE >/dev/null 2>&1 && \
+            echo '      已启动（门户 + 监控）'"
+  else
+    on_nas "cd '$SRC' && $DK compose -p $PROJECT up -d --no-build $SERVICE >/dev/null 2>&1 && \
+            echo '      已启动（门户；该版本没有监控）' && { $DK rm -f $MONITOR_CONTAINER >/dev/null 2>&1; true; }"
+  fi
+}
+
+# 监控的验收：镜像要是本次标签、/health 要 200（预热中也是 200）。
+check_monitor() {
+  local tag="$1" mimg mcode
+  on_nas "$DK run --rm --network none --entrypoint test $IMAGE:$tag -f /app/nas_monitor.py >/dev/null 2>&1" || return 0
+  mimg=$(on_nas "$DK inspect '$MONITOR_CONTAINER' --format '{{.Config.Image}}' 2>/dev/null" || true)
+  for _ in 1 2 3 4 5 6; do
+    mcode=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "$MONITOR_HEALTH_URL" || true)
+    [ "$mcode" = "200" ] && break
+    sleep 5
+  done
+  say "      监控容器镜像：$mimg  监控 health=$mcode"
+  [ "$mimg" = "$IMAGE:$tag" ] && [ "$mcode" = "200" ]
+}
 lock_acquired=0
 
 say() { printf '%s\n' "$*"; }
@@ -230,8 +270,7 @@ if [ "$MODE" = "rollback" ]; then
   UNDOING=$(on_nas "grep '^PORTAL_IMAGE_TAG=' $SRC/.env 2>/dev/null | cut -d= -f2-" || true)
 
   say "回滚到 $IMAGE:${ROLLBACK_SHA}（撤销 ${UNDOING:-<读不到上一个标签>}）"
-  on_nas "cd $SRC && printf 'PORTAL_IMAGE_TAG=%s\n' '$ROLLBACK_SHA' > .env && \
-          $DK compose -p $PROJECT up -d --no-build $SERVICE >/dev/null 2>&1 && echo ok"
+  start_services "$ROLLBACK_SHA"
   sleep 3
   code=$(curl -s -m 8 -o /dev/null -w '%{http_code}' "$HEALTH_URL" || true)
   say "health=$code"
@@ -348,9 +387,7 @@ prune_extras "$SHA"
 
 # ---- 6. 构建不可变镜像 + 切标签起容器 --------------------------------------
 say "[6/7] 构建 $IMAGE:$SHORT 并启动（不动 latest）"
-on_nas "cd '$SRC' && printf 'PORTAL_IMAGE_TAG=%s\n' '$SHORT' > .env && \
-        $DK compose -p $PROJECT build $SERVICE >/dev/null 2>&1 && \
-        $DK compose -p $PROJECT up -d $SERVICE >/dev/null 2>&1 && echo '      已启动'"
+start_services "$SHORT" build
 
 # ---- 7. 验收：镜像来源比对 + 健康检查；不合格自动回到上一个标签 -------------
 say "[7/7] 验收"
@@ -384,13 +421,15 @@ failed = ",".join(d.get("sources", {}).get("failed") or []) or "无"
 print("health.status=%s 卡片=%s 不可达源=%s" % (d.get("status"), d.get("cards"), failed))' 2>&1)"
 fi
 
-if [ "$running" != "$IMAGE:$SHORT" ] || [ "$code" != "200" ] || [ "$pcode" != "200" ]; then
+monitor_ok=1
+check_monitor "$SHORT" || monitor_ok=0
+
+if [ "$running" != "$IMAGE:$SHORT" ] || [ "$code" != "200" ] || [ "$pcode" != "200" ] || [ "$monitor_ok" != 1 ]; then
   if [ -n "$PREV" ] && [ "$PREV" != "$SHORT" ]; then
     say "      验收未通过 → 自动回滚到 $PREV"
-    on_nas "cd '$SRC' && printf 'PORTAL_IMAGE_TAG=%s\n' '$PREV' > .env && \
-            $DK compose -p $PROJECT up -d --no-build $SERVICE >/dev/null 2>&1 && echo '      已回滚'"
+    start_services "$PREV"
   fi
-  die "验收未通过（镜像=$running health=$code portal=${pcode}）"
+  die "验收未通过（镜像=$running health=$code portal=${pcode} 监控=${monitor_ok}）"
 fi
 
 say "✅ $SHORT 已上线：$PORTAL_URL_"

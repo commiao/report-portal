@@ -162,7 +162,10 @@ class ReleasePathTests(unittest.TestCase):
         """清残留要靠「被撤销的是哪一次」，而那个值就存在马上要被覆盖的 .env 里。
         顺序错了就永远读不到，清理只能退化成不清。"""
         rb = RELEASE.split('if [ "$MODE" = "rollback" ]; then', 1)[1]
-        self.assertLess(rb.index("UNDOING=$("), rb.index("PORTAL_IMAGE_TAG=%s"))
+        # .env 由 start_services 覆盖（门户与 nas_monitor 共用），所以要在调用它之前读。
+        self.assertLess(rb.index("UNDOING=$("), rb.index('start_services "$ROLLBACK_SHA"'))
+        starter = RELEASE.split("start_services() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("PORTAL_IMAGE_TAG=%s", starter)
 
     def test_rollback_widens_recoverability_to_one_named_ref_not_all(self):
         """回滚多认一条线是**收窄**不是放宽：只认调用方明确指出的那个 ref

@@ -35,6 +35,44 @@ services:
     networks:
       - kghub
 
+  # NAS 存储与写盘监控（nas_monitor.py）：门户的一个数据源，看板 /dashboard/nas。
+  # 同一个镜像、不同的入口；随 deploy/release.sh 一起发布和回滚。
+  nas_monitor:
+    image: report-portal:${PORTAL_IMAGE_TAG:?必须由 deploy/release.sh 按 git commit 设定；不接受 latest}
+    container_name: nas-monitor
+    restart: unless-stopped
+    command: ["python", "nas_monitor.py"]
+    # 1027:100 = commiao:users（多个项目数据目录是 commiao 0700）。附加组：
+    #   0     读 /var/run/docker.sock（root:root 0660）——代码里只发 GET，见 DockerReader；
+    #   10001 统计 zhaopin data/backups（10002:10001 0770）的大小，不读内容。
+    user: "1027:100"
+    group_add: ["0", "10001"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    environment:
+      - TZ=Asia/Shanghai
+      - NAS_MONITOR_DB=/data/nas-monitor.sqlite3
+      - NAS_MONITOR_FEISHU_FILE=/secrets/feishu-webhook.json
+      - NAS_MONITOR_LINK=http://100.123.208.32:17174
+    volumes:
+      # /proc/diskstats 不分命名空间，容器里读到的就是整机计数，无需挂载。
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /volume2/4T/nas-monitor/data:/data
+      # 飞书 webhook（{"url": ..., "secret"?: ...}，0600，不进 git）；文件不存在时只在看板标红、不发通知。
+      - /volume2/4T/nas-monitor/secrets:/secrets:ro
+      # 只读挂载各项目要统计的目录（与 monitor/projects.json 对应，测试会核对）。
+      - /volume2/4T/kg-hub-data:/host/kg-hub-data:ro
+      - /volume2/4T/model-gateway:/host/model-gateway:ro
+      - /volume1/docker/recruitment-intel-service/release-staging:/host/zhaopin/release-staging:ro
+      - /volume1/docker/recruitment-intel-service/data/backups:/host/zhaopin/backups:ro
+    ports:
+      # 和门户一样只绑本机回环；tailscale 把 <tailscale-ip>:17174 转发过来。
+      - "127.0.0.1:17174:8080"
+    networks:
+      - kghub
+
 networks:
   # Reuse kg-hub's existing network so service-name DNS (kg_hub_server) resolves.
   kghub:
