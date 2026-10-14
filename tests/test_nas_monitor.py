@@ -373,6 +373,28 @@ class MonitorTests(unittest.TestCase):
         state = nm.Store(Path(self.tmp.name, "m.sqlite3")).load_alert_state()
         self.assertEqual(state["global:volume-md3"]["level"], "crit")     # 重启后不会重复发
 
+    def test_problems_found_before_feishu_is_configured_are_sent_once_it_is(self):
+        self.store.save_alert_state({})
+        quiet = nm.Monitor(REGISTRY, self.store, None, None, diskstats_path=str(self.disk))
+        quiet.snapshot.update(volumes={"md3": {"label": "volume2", "used_pct": 95, "used": 1, "total": 2}})
+        quiet.evaluate_and_alert(time.time())
+        self.assertEqual(self.store.load_alert_state(), {})          # 没发出去就不算通知过
+        sent = []
+        later = nm.Monitor(REGISTRY, self.store, None, lambda t: sent.append(t) or True, diskstats_path=str(self.disk))
+        later.snapshot.update(volumes={"md3": {"label": "volume2", "used_pct": 95, "used": 1, "total": 2}})
+        later.evaluate_and_alert(time.time())
+        self.assertEqual(len(sent), 1)
+
+    def test_a_failed_send_is_retried_next_round(self):
+        attempts = []
+        flaky = nm.Monitor(REGISTRY, self.store, None, lambda t: attempts.append(t) and False,
+                           diskstats_path=str(self.disk))
+        flaky.snapshot.update(volumes={"md3": {"label": "volume2", "used_pct": 95, "used": 1, "total": 2}})
+        flaky.evaluate_and_alert(time.time())
+        flaky.evaluate_and_alert(time.time())
+        self.assertEqual(len(attempts), 2)
+        self.assertIn("feishu", flaky.errors)
+
     def test_health_goes_red_when_sampling_stops_but_not_for_findings(self):
         now = time.time()
         self.mon.started = now - 3600

@@ -623,11 +623,19 @@ class Monitor:
             snap = dict(self.snapshot)
         snap["write_minutes_1h"] = self.write_minutes(3600)
         findings = evaluate(self.registry, snap)
-        lines, self.alert_state = alert_transitions(findings, self.alert_state, now)
+        lines, new_state = alert_transitions(findings, self.alert_state, now)
+        # 只有真正送达才推进告警状态：没配飞书或发送失败时保持原状，下一轮再发。
+        # 否则「没配 webhook 期间」的越线会被记成已通知，配好之后一条也不会来。
+        delivered = not lines
         if lines and self.sender:
             text = "NAS 存储与写盘监控\n" + "\n".join(lines) + f"\n看板：{os.environ.get('NAS_MONITOR_LINK', '')}{DASHBOARD_PATH}"
-            if not self.sender(text):
-                self.errors["feishu"] = time.strftime("%F %T") + " 飞书发送失败"
+            delivered = self.sender(text)
+            if delivered:
+                self.errors.pop("feishu", None)
+            else:
+                self.errors["feishu"] = time.strftime("%F %T") + " 飞书发送失败，下一轮重试"
+        if delivered:
+            self.alert_state = new_state
         with self.lock:
             self.findings = findings
         self.store.save_alert_state(self.alert_state)
