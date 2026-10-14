@@ -8,10 +8,11 @@
     "write_kbs_1h_median": {"warn": 2500, "crit": 5000, "note": "md2+md3 写入的 1 小时分钟中位数；2026-10-10 问题现场约 6300，治理后低负载约 800"},
     "volume_used_pct": {"warn": 80, "crit": 90},
     "dangling_images_gb": {"warn": 2, "crit": 10, "note": "无标签的 <none> 镜像；2026-10-14 首次盘点 745 个"},
-    "build_cache_gb": {"warn": 2, "crit": 5},
+    "build_cache_gb": {"warn": 5, "crit": 10, "note": "发布脚本只清 7 天前的缓存（fleetops_retention），7 天内的属正常"},
     "exited_containers": {"warn": 20, "crit": 60, "note": "已退出且不属于任何登记项目 compose 的容器（实验、构建残留）"}
   },
   "adhoc_container_patterns": ["^t0195-"],
+  "policy_exempt_containers": {"kg-hub-templog": "磁盘温度记录器：只往文件追加，标准输出为空，db 日志驱动不产生写入（2026-10-14 核对）"},
   "projects": [
     {
       "id": "kg-hub",
@@ -19,7 +20,8 @@
       "compose_projects": ["kg-hub"],
       "containers": [],
       "image_repos": ["kg-hub-server"],
-      "max_image_tags": 5,
+      "max_image_tags": 7,
+      "_max_image_tags": "release.sh 保留最新 5 个 + 当前与回滚目标 + 容器在用的，预算留 2 个余量",
       "container_policy": {"min_healthcheck_interval_s": 60, "forbidden_log_drivers": ["db"]},
       "paths": [
         {"id": "ledger", "label": "任务账本 model-attempts.sqlite3", "path": "/host/kg-hub-data/ingest-backup/model-attempts.sqlite3", "warn_gb": 10, "crit_gb": 15, "max_growth_mb_per_day": 1500},
@@ -37,7 +39,8 @@
       "compose_projects": [],
       "containers": ["model-gateway"],
       "image_repos": ["credvault-model-gateway"],
-      "max_image_tags": 5,
+      "max_image_tags": 10,
+      "_max_image_tags": "nas-release.sh 保留最新 5 个；网关回滚要回到原容器，停着的旧容器引用的镜像也保留（2026-10-14 实测 9 个）",
       "container_policy": {"min_healthcheck_interval_s": 60, "forbidden_log_drivers": ["db"]},
       "paths": [
         {"id": "llm-requests", "label": "请求账本 llm-requests.sqlite3", "path": "/host/model-gateway/runtime/state/llm-requests.sqlite3", "warn_gb": 1.5, "crit_gb": 3, "max_growth_mb_per_day": 150},
@@ -56,13 +59,14 @@
       "compose_projects": ["recruitment-intel-nas"],
       "containers": [],
       "image_repos": ["recruitment-intel-service", "recruitment-intel-backup", "recruitment-intel-browser-sidecar"],
-      "max_image_tags": 3,
+      "max_image_tags": 5,
+      "_max_image_tags": "nas-release.sh 保留最新 3 个 + 回滚目标（按镜像 ID）",
       "container_policy": {"min_healthcheck_interval_s": 60, "forbidden_log_drivers": ["db"]},
       "paths": [
         {"id": "backups", "label": "数据库备份 data/backups", "path": "/host/zhaopin/backups", "warn_gb": 2, "crit_gb": 5, "max_growth_mb_per_day": 200}
       ],
       "children": [
-        {"id": "release-staging", "label": "发布包 release-staging（每个约 3GB）", "dir": "/host/zhaopin/release-staging", "pattern": "^20\\d{6}T\\d{6}Z-", "keep": 3, "max_total_gb": 10},
+        {"id": "release-staging", "label": "发布包 release-staging（每个约 3GB）", "dir": "/host/zhaopin/release-staging", "pattern": "^20\\d{6}T\\d{6}Z-", "keep": 4, "max_total_gb": 13, "note": "保留最新 3 个 + 回滚目标"},
         {"id": "build-leftovers", "label": "失败构建残留 .build-*", "dir": "/host/zhaopin/release-staging", "pattern": "^\\.build-", "keep": 0, "max_total_gb": 0.5, "max_age_hours": 2}
       ],
       "freshness": []
