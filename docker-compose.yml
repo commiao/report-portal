@@ -20,6 +20,12 @@ services:
     # 那样线上跑的是哪个 commit 就再也说不清了（准则 1/26）。
     image: report-portal:${PORTAL_IMAGE_TAG:?必须由 deploy/release.sh 按 git commit 设定；不接受 latest}
     container_name: report-portal
+    # Synology 默认的 db 日志驱动每行一次 SQLite 提交，NAS btrfs 上每行约 0.6–0.9MB 写入（T-0245）。
+    logging:
+      driver: local
+      options:
+        max-size: "20m"
+        max-file: "5"
     restart: unless-stopped
     environment:
       - PORTAL_BIND_HOST=0.0.0.0
@@ -40,6 +46,12 @@ services:
   nas_monitor:
     image: report-portal:${PORTAL_IMAGE_TAG:?必须由 deploy/release.sh 按 git commit 设定；不接受 latest}
     container_name: nas-monitor
+    # Synology 默认的 db 日志驱动每行一次 SQLite 提交，NAS btrfs 上每行约 0.6–0.9MB 写入（T-0245）。
+    logging:
+      driver: local
+      options:
+        max-size: "20m"
+        max-file: "5"
     restart: unless-stopped
     command: ["python", "nas_monitor.py"]
     # 1027:100 = commiao:users（多个项目数据目录是 commiao 0700）。附加组：
