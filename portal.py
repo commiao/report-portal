@@ -54,6 +54,14 @@ _DEFAULT_SOURCES = [
         "manifest": "/portal_manifest",
     },
     {
+        # NAS 存储与写盘监控：同一个 compose 项目里的 nas_monitor 服务（nas_monitor.py）。
+        "id": "nas-monitor",
+        "name": "NAS 存储与写盘",
+        "fetch_base": os.environ.get("NAS_MONITOR_FETCH_BASE", "http://nas_monitor:8080"),
+        "link_base": os.environ.get("NAS_MONITOR_LINK_BASE", "http://100.123.208.32:17174"),
+        "manifest": "/portal_manifest",
+    },
+    {
         "id": "openclaw-finance",
         "name": "OpenClaw 财务",
         "cards": [

@@ -60,3 +60,24 @@ curl -s http://100.123.208.32:17172/portal | grep -oE "知识胶囊看板|使用
 ## 一个源不可达不会拖垮门户
 
 `portal.py` 抓每个源的 manifest 都 try/except；失败的源显示红点 + "暂不可达"，其它源照常渲染。
+
+## nas_monitor：NAS 存储与写盘监控（第二个服务）
+
+同一个镜像、同一个 compose 项目里的第二个服务（`nas_monitor.py`，容器 `nas-monitor`，
+`127.0.0.1:17174` → tailnet `http://100.123.208.32:17174/dashboard/nas`），作为门户的一个
+manifest 源出现在首页。2026-10-14 为 NAS 写盘治理（T-0234/T-0245）建立。
+
+- **采集**：每 10 秒读 `/proc/diskstats`（整机，按分钟记账）；每 5 分钟经只读挂载的 docker
+  socket 取容器、事件（只发 GET；容器详情只取日志驱动和健康检查间隔）；每 30 分钟统计各
+  项目登记目录的占用与日增长；`/system/df`（镜像与构建缓存）每 2 小时一次。
+- **看不到按进程的写盘**：那需要 `--pid=host` 或 root，按约定不开。各项目的贡献用存储增长、
+  配置检查和容器启动记录（发布、实验）来判断。
+- **预算与检查项**：`monitor/projects.json`。加项目 = 加一段登记 + 在 `docker-compose.yml`
+  的 `nas_monitor.volumes` 里只读挂载它的目录（`tests/test_nas_monitor.py` 会核对两边对得上）。
+- **告警**：某项升级到 warn/crit 时发飞书，crit 每 12 小时重复，恢复时也发。webhook 放在
+  NAS 的 `/volume2/4T/nas-monitor/secrets/feishu-webhook.json`（`{"url": ..., "secret"?: ...}`，
+  0600，不进 git）；文件不存在时只在看板标红。
+- **它自己的写盘**：一个常驻 SQLite 连接，每 5 分钟批量提交，数据在
+  `/volume2/4T/nas-monitor/data`，保留 30 天。
+- **health**：量的是采集还在不在干活（采样 3 分钟没更新即 503），不受检查结果影响——
+  NAS 上有残留不该让发布把监控自己回滚掉。

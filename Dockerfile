@@ -8,6 +8,8 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY portal.py /app/portal.py
+COPY nas_monitor.py /app/nas_monitor.py
+COPY monitor /app/monitor
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
