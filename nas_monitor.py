@@ -251,6 +251,8 @@ def project_of(registry: dict, name: str, labels: dict) -> str:
             return p["id"]
         if name in p.get("containers", []):
             return p["id"]
+        if any(re.search(pattern, name or "") for pattern in p.get("container_patterns", [])):
+            return p["id"]
     for pattern in registry.get("adhoc_container_patterns", []):
         if re.search(pattern, name):
             return "experiments"

@@ -160,7 +160,13 @@
           "max_total_gb": 0.5
         }
       ],
-      "freshness": []
+      "freshness": [],
+      "container_patterns": [
+        "^model-gateway-held-",
+        "^model-gateway-approved-previous-",
+        "^kg-(attribute|cross-episode)-.*probe$"
+      ],
+      "_container_patterns": "网关回滚要回到原容器：发布/恢复时把旧实例改名 held/approved-previous 停着保留；kg-*-probe 是 T-0257 的隔离实验网关及其可回退的旧实例"
     },
     {
       "id": "zhaopin",
@@ -207,9 +213,10 @@
           "label": "失败构建残留 .build-*",
           "dir": "/host/zhaopin/release-staging",
           "pattern": "^\\.build-",
-          "keep": 0,
-          "max_total_gb": 0.5,
-          "max_age_hours": 2
+          "keep": 3,
+          "max_total_gb": 1,
+          "max_age_hours": 2,
+          "note": "进行中的构建也会有 .build-*（2026-10-14 同时见到两个），只按年龄判：存在超过 max_age_hours 才算残留"
         }
       ],
       "freshness": []
