@@ -215,19 +215,19 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(find(f, "kg-hub:growth-ledger")["level"], "crit")
 
     def test_release_staging_and_build_leftovers(self):
-        children = {("zhaopin", "release-staging"): {"count": 8, "bytes": int(23 * GiB), "oldest_age_h": 40, "names": []},
+        children = {("zhaopin", "release-staging"): {"count": 10, "bytes": int(29 * GiB), "oldest_age_h": 40, "names": []},
                     ("zhaopin", "build-leftovers"): {"count": 1, "bytes": 11 * 1024 ** 2, "oldest_age_h": 20, "names": []}}
         f = nm.evaluate(REGISTRY, self.snap(children=children))
         self.assertEqual(find(f, "zhaopin:children-release-staging")["level"], "crit")
         self.assertEqual(find(f, "zhaopin:children-build-leftovers")["level"], "warn")
-        ok = {("zhaopin", "release-staging"): {"count": 3, "bytes": int(8.7 * GiB), "oldest_age_h": 40, "names": []},
+        ok = {("zhaopin", "release-staging"): {"count": 4, "bytes": int(11.3 * GiB), "oldest_age_h": 40, "names": []},
               ("zhaopin", "build-leftovers"): {"count": 0, "bytes": 0, "oldest_age_h": None, "names": []}}
         f = nm.evaluate(REGISTRY, self.snap(children=ok))
         self.assertEqual(find(f, "zhaopin:children-release-staging")["level"], "ok")
         self.assertEqual(find(f, "zhaopin:children-build-leftovers")["level"], "ok")
 
     def test_one_entry_over_the_keep_count_is_already_a_warning(self):
-        children = {("zhaopin", "release-staging"): {"count": 4, "bytes": int(8 * GiB), "oldest_age_h": 40, "names": []}}
+        children = {("zhaopin", "release-staging"): {"count": 5, "bytes": int(11 * GiB), "oldest_age_h": 40, "names": []}}
         self.assertEqual(find(nm.evaluate(REGISTRY, self.snap(children=children)),
                               "zhaopin:children-release-staging")["level"], "warn")
 
@@ -256,6 +256,12 @@ class EvaluateTests(unittest.TestCase):
         f = nm.evaluate(REGISTRY, self.snap(images=dict(self.snap()["images"], repo_tags=tags)))
         self.assertEqual(find(f, "kg-hub:image-tags-kg-hub-server")["level"], "crit")
         self.assertEqual(find(f, "credvault:image-tags-credvault-model-gateway")["level"], "ok")
+
+    def test_exempt_containers_are_skipped_by_the_policy_check(self):
+        policies = {"kg-hub": {"kg-hub-templog": {"log_driver": "db", "healthcheck_interval_s": None}},
+                    "credvault": {}, "zhaopin": {}}
+        self.assertEqual(find(nm.evaluate(REGISTRY, self.snap(policies=policies)), "kg-hub:container-policy")["level"], "ok")
+        self.assertIn("kg-hub-templog", REGISTRY["policy_exempt_containers"])
 
     def test_container_policy_flags_frequent_health_checks_and_db_logs(self):
         policies = {"zhaopin": {"recruitment-postgres": {"log_driver": "db", "healthcheck_interval_s": 10.0},

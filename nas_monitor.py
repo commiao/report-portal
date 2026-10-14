@@ -371,7 +371,10 @@ def evaluate(registry: dict, snap: dict) -> list[dict]:
                 f"保留 ≤ {keep} 个")
         rule = p.get("container_policy") or {}
         bad = []
+        exempt = registry.get("policy_exempt_containers", {})
         for name, pol in sorted((policies.get(pid) or {}).items()):
+            if name in exempt:
+                continue
             interval = pol.get("healthcheck_interval_s")
             if interval is not None and interval < rule.get("min_healthcheck_interval_s", 0):
                 bad.append(f"{name} 健康检查每 {interval:.0f}s")
